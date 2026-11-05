@@ -1,8 +1,8 @@
-# Sudogemin AI
+# Sudogemini AI
 
-**Sudogemin** is an enterprise B2B data intelligence and brokerage platform in development.
+**Sudogemini** is an enterprise B2B data intelligence and brokerage platform in development.
 
-- **Platform:** Sudogemin Nexus
+- **Platform:** Sudogemini Nexus
 - **Owner:** Jason Lane Davidson Jr
 - **Primary cloud region:** AWS US East (Ohio), `us-east-2`
 - **AI layer:** Amazon Bedrock Runtime (Converse API), subject to account model access and quotas
