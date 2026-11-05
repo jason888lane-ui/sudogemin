@@ -24,12 +24,12 @@ SEED = os.getenv("MERKLE_SEED", "sudogemin-v1")
 app = FastAPI(title=APP_NAME, version="1.0.0", description="B2B data brokerage API")
 
 AGENTS = [
-    {"id": "ingestion", "name": "Ingestion Agent", "role": "Validate and register incoming data sources"},
-    {"id": "enrichment", "name": "Enrichment Agent", "role": "Normalize metadata and enrich dataset profiles"},
-    {"id": "quality", "name": "Data Quality Agent", "role": "Check completeness, freshness, and schema consistency"},
-    {"id": "scoping", "name": "Customer Scoping Agent", "role": "Match buyer requirements to dataset metadata"},
-    {"id": "marketplace", "name": "Marketplace Agent", "role": "Prepare listings and quote workflows"},
-    {"id": "governance", "name": "Human Approval Agent", "role": "Require human approval before publishing or charging"},
+    {"id": "ingestion", "name": "Ingestion Agent", "role": "Register approved sources and preserve provenance and license evidence"},
+    {"id": "quality", "name": "Data Quality and Enrichment Agent", "role": "Normalize metadata and validate completeness, freshness, and schema consistency"},
+    {"id": "scoping", "name": "Customer Scoping Agent", "role": "Match buyer requirements to permitted dataset metadata"},
+    {"id": "marketplace", "name": "Marketplace Agent", "role": "Prepare catalog listings, quotes, and entitlement checks"},
+    {"id": "sales", "name": "Sales and Monetization Agent", "role": "Prepare sales workflows and billing events without bypassing payment controls"},
+    {"id": "governance", "name": "Governance and Human Approval Agent", "role": "Enforce human approvals, audit, and release controls"},
 ]
 
 DATASETS: dict[str, dict[str, Any]] = {}
@@ -51,7 +51,6 @@ class TradeIn(BaseModel):
     buyer_id: str
     dataset_id: str
     amount_usd: float = Field(gt=0, le=1000000)
-    human_approved: bool = False
 
 def digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
@@ -106,24 +105,14 @@ def match_buyer(item: MatchIn):
         results.append({"dataset": ds, "match_score": round(score, 4), "matched_terms": hits})
     return {"buyer_id": item.buyer_id, "matches": sorted(results, key=lambda x: x["match_score"], reverse=True)}
 
-@app.post("/api/trades", status_code=202)
+@app.post("/api/trades", status_code=503)
 def create_trade(item: TradeIn):
-    if item.dataset_id not in DATASETS:
-        raise HTTPException(status_code=404, detail="Dataset not found")
-    if not item.human_approved:
-        raise HTTPException(status_code=409, detail="Human approval required before trade or payment")
-    trade_id = str(uuid.uuid4())
-    payload = json.dumps({"trade_id": trade_id, "buyer_id": item.buyer_id,
-                          "dataset_id": item.dataset_id, "amount_usd": item.amount_usd},
-                         sort_keys=True, separators=(",", ":"))
-    root = merkle_root(payload)
-    trade = {"id": trade_id, "status": "approved_pending_payment",
-             "buyer_id": item.buyer_id, "dataset_id": item.dataset_id,
-             "amount_usd": item.amount_usd, "merkle_root": root,
-             "payment_status": "not_configured", "created_at": int(time.time())}
-    # No charge is initiated by this endpoint. Stripe checkout/payment integration is a later explicit step.
-    TRADES[trade_id] = trade
-    return trade
+    # Fail closed: the prototype has no authenticated approval workflow or durable
+    # transaction store. A client-supplied boolean must never authorize a trade.
+    raise HTTPException(
+        status_code=503,
+        detail="Trading is disabled until authenticated tenant-scoped approvals, durable storage, and payment reconciliation are implemented."
+    )
 
 @app.get("/api/trades")
 def list_trades():
@@ -184,7 +173,7 @@ def create_subscription_checkout(item: CheckoutIn):
     price_id = os.getenv("STRIPE_PRICE_ID")
     if not price_id:
         raise HTTPException(status_code=503, detail="STRIPE_PRICE_ID is missing.")
-    base = os.getenv("APP_BASE_URL", "https://sudogemini.onrender.com").rstrip("/")
+    base = os.getenv("APP_BASE_URL", "http://localhost:8000").rstrip("/")
     try:
         session = sdk.checkout.Session.create(
             mode="subscription",
