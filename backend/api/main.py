@@ -18,9 +18,9 @@ try:
 except ImportError:
     cudaq = None
 
-APP_NAME = "Sudogemin"
+APP_NAME = "Sudogemini"
 OWNER = "Jason Lane Davidson Jr"
-SEED = os.getenv("MERKLE_SEED", "sudogemin-v1")
+SEED = os.getenv("MERKLE_SEED", "sudogemini-v1")
 app = FastAPI(title=APP_NAME, version="1.0.0", description="B2B data brokerage API")
 
 AGENTS = [
@@ -62,7 +62,7 @@ def merkle_root(payload: str) -> str:
 @app.get("/")
 def home():
     return {"name": APP_NAME, "status": "operational", "version": app.version,
-            "message": "Sudogemin API is running", "docs": "/docs"}
+            "message": "Sudogemini API is running", "docs": "/docs"}
 
 @app.get("/health")
 def health():
@@ -181,7 +181,7 @@ def create_subscription_checkout(item: CheckoutIn):
             line_items=[{"price": price_id, "quantity": 1}],
             success_url=base + "/?billing=success&session_id={CHECKOUT_SESSION_ID}",
             cancel_url=base + "/?billing=cancelled",
-            metadata={"product": "Sudogemin"}
+            metadata={"product": "Sudogemini"}
         )
         return {"checkout_url": session.url, "session_id": session.id, "mode": "subscription"}
     except Exception as exc:
@@ -202,7 +202,7 @@ def create_trade_checkout(trade_id: str):
             line_items=[{"price_data": {
                 "currency": "usd",
                 "unit_amount": int(round(trade["amount_usd"] * 100)),
-                "product_data": {"name": "Sudogemin dataset purchase " + trade["dataset_id"]}
+                "product_data": {"name": "Sudogemini dataset purchase " + trade["dataset_id"]}
             }, "quantity": 1}],
             success_url=base + "/?trade=" + trade_id + "&payment=success",
             cancel_url=base + "/?trade=" + trade_id + "&payment=cancelled",
