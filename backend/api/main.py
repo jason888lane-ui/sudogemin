@@ -6,6 +6,7 @@ import uuid
 from typing import Any
 
 import boto3
+from boto3.dynamodb.conditions import Key
 import jwt
 from jwt import PyJWKClient
 from fastapi import FastAPI, HTTPException, Request
@@ -130,7 +131,7 @@ def agents():
 @app.get("/api/dashboard")
 def dashboard(request: Request):
     tid = tenant(request)
-    ds_count = _datasets.query(Select="COUNT", KeyConditionExpression=__import__("boto3").dynamodb.conditions.Key("tenant_id").eq(tid))["Count"]
+    ds_count = _datasets.query(Select="COUNT", KeyConditionExpression=Key("tenant_id").eq(tid))["Count"]
     trade_count = _trades.query(Select="COUNT", KeyConditionExpression=__import__("boto3").dynamodb.conditions.Key("tenant_id").eq(tid))["Count"]
     return {"platform": APP_NAME, "owner": OWNER, "agents": len(AGENTS),
             "datasets": ds_count, "trades": trade_count,
