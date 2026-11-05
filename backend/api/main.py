@@ -195,7 +195,7 @@ def create_trade_checkout(trade_id: str):
         raise HTTPException(status_code=404, detail="Trade not found")
     if trade.get("status") != "approved_pending_payment":
         raise HTTPException(status_code=409, detail="Trade is not approved for checkout")
-    base = os.getenv("APP_BASE_URL", "https://sudogemini.onrender.com").rstrip("/")
+    base = os.getenv("APP_BASE_URL", "http://localhost:8000").rstrip("/")
     try:
         session = sdk.checkout.Session.create(
             mode="payment",
