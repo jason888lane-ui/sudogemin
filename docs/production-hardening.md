@@ -1,4 +1,4 @@
-# Sudogemin production hardening and AWS architecture
+# Sudogemini production hardening and AWS architecture
 
 ## Executive status
 
@@ -124,9 +124,9 @@ Every tenant-owned row must be scoped by tenant ID and enforced in the database/
 
 ## Brand and naming rules
 
-- Product/brand spelling: **Sudogemin**.
-- Platform name: **Sudogemin Nexus**.
-- Avoid introducing the misspelling `Sudogemini` in customer-facing names.
+- Product/brand spelling: **Sudogemini**.
+- Platform name: **Sudogemini Nexus**.
+- Avoid introducing the misspelling `Sudogeminii` in customer-facing names.
 - Do not rename existing AWS resources blindly. Resource identifiers may be referenced by policies, deployments, or data; migrate them deliberately.
 
 ## Definition of done
