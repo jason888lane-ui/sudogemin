@@ -18,10 +18,10 @@ try:
 except ImportError:
     cudaq = None
 
-APP_NAME = "Sudogemin"
+APP_NAME = "Sudogemini"
 OWNER = "Jason Lane Davidson Jr"
 SEED = os.getenv("MERKLE_SEED", "sudogemin-v1")
-app = FastAPI(title=APP_NAME, version="1.0.0", description="B2B data brokerage API")
+app = FastAPI(title=APP_NAME, version="1.0.0", description="AI development and B2B data brokerage platform API")
 
 AGENTS = [
     {"id": "ingestion", "name": "Ingestion Agent", "role": "Validate and register incoming data sources"},
@@ -30,6 +30,9 @@ AGENTS = [
     {"id": "scoping", "name": "Customer Scoping Agent", "role": "Match buyer requirements to dataset metadata"},
     {"id": "marketplace", "name": "Marketplace Agent", "role": "Prepare listings and quote workflows"},
     {"id": "governance", "name": "Human Approval Agent", "role": "Require human approval before publishing or charging"},
+    {"id": "security", "name": "Security Agent", "role": "Check access policies, data handling controls, and audit requirements"},
+    {"id": "orchestration", "name": "Orchestration Agent", "role": "Coordinate agent workflows, retries, and task handoffs under policy"},
+    {"id": "observability", "name": "Operations Agent", "role": "Track workflow health, failures, and operational metrics"},
 ]
 
 DATASETS: dict[str, dict[str, Any]] = {}
