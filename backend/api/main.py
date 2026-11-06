@@ -34,6 +34,9 @@ AGENTS = [
 
 DATASETS: dict[str, dict[str, Any]] = {}
 TRADES: dict[str, dict[str, Any]] = {}
+# Temporary process-local webhook state. Use a database-backed event ledger before production scale.
+PROCESSED_STRIPE_EVENTS: set[str] = set()
+SUBSCRIPTIONS: dict[str, dict[str, Any]] = {}
 
 class DatasetIn(BaseModel):
     name: str = Field(min_length=2, max_length=120)
@@ -227,25 +230,82 @@ def create_trade_checkout(trade_id: str):
 
 @app.post("/api/billing/webhook")
 async def stripe_webhook(request: Request):
+    """Receive signed Stripe events. Configure this exact URL in Stripe:
+    https://sudogemini.onrender.com/api/billing/webhook
+    """
     if not stripe:
         raise HTTPException(status_code=503, detail="Stripe SDK is not installed")
     secret = os.getenv("STRIPE_WEBHOOK_SECRET")
     if not secret:
         raise HTTPException(status_code=503, detail="STRIPE_WEBHOOK_SECRET is not configured")
+
     payload = await request.body()
     signature = request.headers.get("stripe-signature", "")
     try:
         event = stripe.Webhook.construct_event(payload, signature, secret)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid Stripe webhook signature or payload")
-    event_type = event["type"]
-    obj = event["data"]["object"]
-    if event_type == "checkout.session.completed":
-        trade_id = (obj.get("metadata") or {}).get("trade_id")
+
+    event_id = event.get("id")
+    event_type = event.get("type", "unknown")
+    if not event_id:
+        raise HTTPException(status_code=400, detail="Stripe event ID is missing")
+    if event_id in PROCESSED_STRIPE_EVENTS:
+        return {"received": True, "duplicate": True, "event_type": event_type}
+
+    obj = (event.get("data") or {}).get("object") or {}
+    metadata = obj.get("metadata") or {}
+
+    if event_type in ("checkout.session.completed", "checkout.session.async_payment_succeeded"):
+        trade_id = metadata.get("trade_id")
         if trade_id in TRADES:
             TRADES[trade_id]["payment_status"] = "paid"
             TRADES[trade_id]["status"] = "paid"
-    return {"received": True, "event_type": event_type}
+        subscription_id = obj.get("subscription")
+        if subscription_id:
+            SUBSCRIPTIONS[str(subscription_id)] = {
+                "id": str(subscription_id),
+                "customer_id": obj.get("customer"),
+                "status": "active",
+                "checkout_session_id": obj.get("id"),
+                "updated_at": int(time.time())
+            }
+
+    elif event_type in (
+        "customer.subscription.created",
+        "customer.subscription.updated",
+        "customer.subscription.deleted"
+    ):
+        subscription_id = obj.get("id")
+        if subscription_id:
+            SUBSCRIPTIONS[str(subscription_id)] = {
+                "id": str(subscription_id),
+                "customer_id": obj.get("customer"),
+                "status": obj.get("status", "unknown"),
+                "price_ids": [
+                    item.get("price", {}).get("id")
+                    for item in (obj.get("items") or {}).get("data", [])
+                    if item.get("price", {}).get("id")
+                ],
+                "cancel_at_period_end": bool(obj.get("cancel_at_period_end", False)),
+                "updated_at": int(time.time())
+            }
+
+    elif event_type in ("invoice.paid", "invoice.payment_succeeded"):
+        subscription_id = obj.get("subscription")
+        if subscription_id and str(subscription_id) in SUBSCRIPTIONS:
+            SUBSCRIPTIONS[str(subscription_id)]["last_invoice_status"] = "paid"
+            SUBSCRIPTIONS[str(subscription_id)]["updated_at"] = int(time.time())
+
+    elif event_type == "invoice.payment_failed":
+        subscription_id = obj.get("subscription")
+        if subscription_id and str(subscription_id) in SUBSCRIPTIONS:
+            SUBSCRIPTIONS[str(subscription_id)]["last_invoice_status"] = "payment_failed"
+            SUBSCRIPTIONS[str(subscription_id)]["updated_at"] = int(time.time())
+
+    # Mark only after successful handling so Stripe retries events that fail above.
+    PROCESSED_STRIPE_EVENTS.add(event_id)
+    return {"received": True, "duplicate": False, "event_type": event_type}
 
 @app.post("/api/quantum/match")
 def quantum_match(item: QuantumMatchIn):
