@@ -13,7 +13,7 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py .
+COPY main.py personal_intelligence.py ./
 
 RUN useradd --create-home --uid 10001 appuser \
     && chown -R appuser:appuser /app
