@@ -43,7 +43,7 @@ PROFILE = {
         },
     },
     "astrology": {
-        "birth_details_on_file": True,
+        "birth_details": {"date": "1996-12-25", "local_time": "09:30", "birthplace": "Indianapolis, Indiana, USA"},
         "birth_chart_status": "placements_not_yet_independently_verified",
         "interpretation": (
             "Do not infer planetary placements or aspects until a chart is calculated "
