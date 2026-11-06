@@ -11,6 +11,7 @@ import jwt
 from jwt import PyJWKClient
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
+from personal_intelligence import executive_guidance
 
 try:
     import stripe
@@ -137,6 +138,16 @@ def dashboard(request: Request):
             "datasets": ds_count, "trades": trade_count,
             "quantum": quantum_status(), "payments": stripe_status(),
             "approval_required": True, "tenant_scoped": True}
+
+@app.get("/api/personal-intelligence")
+def personal_intelligence(request: Request, year: int | None = None):
+    # This is private owner data, never shared with ordinary customer tenants.
+    owner_sub = os.getenv("OWNER_COGNITO_SUB", "").strip()
+    if not owner_sub:
+        raise HTTPException(status_code=503, detail="Owner profile access is not configured")
+    if getattr(request.state, "subject", None) != owner_sub:
+        raise HTTPException(status_code=403, detail="Owner access required")
+    return executive_guidance(year)
 
 @app.post("/api/datasets", status_code=201)
 def create_dataset(item: DatasetIn, request: Request):
