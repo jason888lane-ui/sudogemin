@@ -38,6 +38,8 @@ TRADES: dict[str, dict[str, Any]] = {}
 PROCESSED_STRIPE_EVENTS: set[str] = set()
 SUBSCRIPTIONS: dict[str, dict[str, Any]] = {}
 
+from persistence import persist_stripe_event, database_ready
+
 class DatasetIn(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     description: str = Field(default="", max_length=2000)
@@ -159,7 +161,7 @@ def stripe_status():
     return {"status": "live_ready" if ready else "configuration_required",
             "mode": "live" if key.startswith("sk_live_") else "off",
             "checkout_enabled": ready,
-            "webhook_configured": bool(os.getenv("STRIPE_WEBHOOK_SECRET"))}
+            "webhook_configured": bool(os.getenv("STRIPE_WEBHOOK_SECRET")),\n            "persistent_storage": database_ready()}
 
 def quantum_status():
     enabled = os.getenv("CUDA_Q_ENABLED", "false").lower() == "true"
@@ -250,10 +252,15 @@ async def stripe_webhook(request: Request):
     event_type = event.get("type", "unknown")
     if not event_id:
         raise HTTPException(status_code=400, detail="Stripe event ID is missing")
-    if event_id in PROCESSED_STRIPE_EVENTS:
-        return {"received": True, "duplicate": True, "event_type": event_type}
-
+    if not database_ready():
+        raise HTTPException(status_code=503, detail="Persistent webhook storage is not configured; set DATABASE_URL in Render.")
     obj = (event.get("data") or {}).get("object") or {}
+    try:
+        duplicate = persist_stripe_event(event_id, event_type, obj)
+    except Exception:
+        raise HTTPException(status_code=503, detail="Webhook storage unavailable; Stripe should retry this event.")
+    if duplicate:
+        return {"received": True, "duplicate": True, "event_type": event_type}
     metadata = obj.get("metadata") or {}
 
     if event_type in ("checkout.session.completed", "checkout.session.async_payment_succeeded"):
@@ -303,7 +310,7 @@ async def stripe_webhook(request: Request):
             SUBSCRIPTIONS[str(subscription_id)]["last_invoice_status"] = "payment_failed"
             SUBSCRIPTIONS[str(subscription_id)]["updated_at"] = int(time.time())
 
-    # Mark only after successful handling so Stripe retries events that fail above.
+    # The durable event ledger is committed before returning a success response.
     PROCESSED_STRIPE_EVENTS.add(event_id)
     return {"received": True, "duplicate": False, "event_type": event_type}
 
