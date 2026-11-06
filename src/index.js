@@ -36,7 +36,7 @@ export default {
       const body = ["GET", "HEAD"].includes(method) ? new ArrayBuffer(0) : await request.arrayBuffer();
       const payloadHash = await sha256Hex(body);
       const now = new Date();
-      const amzDate = now.toISOString().replace(/[:-]|\\.\\d{3}/g, "");
+      const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
       const dateStamp = amzDate.slice(0, 8);
       const canonicalUri = target.pathname.split("/").map(part => encodeRFC3986(decodeURIComponent(part))).join("/") || "/";
       const canonicalQuery = [...target.searchParams.entries()]
@@ -55,11 +55,11 @@ export default {
       headers.set("host", target.host);
 
       const signedHeaderNames = ["host", "x-amz-content-sha256", "x-amz-date"];
-      const canonicalHeaders = signedHeaderNames.map(name => name + ":" + headers.get(name).trim().replace(/\\s+/g, " ") + "\\n").join("");
+      const canonicalHeaders = signedHeaderNames.map(name => name + ":" + headers.get(name).trim().replace(/\s+/g, " ") + "\n").join("");
       const signedHeaders = signedHeaderNames.join(";");
-      const canonicalRequest = [method, canonicalUri, canonicalQuery, canonicalHeaders, signedHeaders, payloadHash].join("\\n");
+      const canonicalRequest = [method, canonicalUri, canonicalQuery, canonicalHeaders, signedHeaders, payloadHash].join("\n");
       const credentialScope = dateStamp + "/" + AWS_REGION + "/" + AWS_SERVICE + "/aws4_request";
-      const stringToSign = "AWS4-HMAC-SHA256\\n" + amzDate + "\\n" + credentialScope + "\\n" + await sha256Hex(new TextEncoder().encode(canonicalRequest));
+      const stringToSign = "AWS4-HMAC-SHA256\n" + amzDate + "\n" + credentialScope + "\n" + await sha256Hex(new TextEncoder().encode(canonicalRequest));
       const signingKey = await getSigningKey(env.AWS_SECRET_ACCESS_KEY, dateStamp, AWS_REGION, AWS_SERVICE);
       const signature = await hmacHex(signingKey, stringToSign);
       headers.set("Authorization", "AWS4-HMAC-SHA256 Credential=" + env.AWS_ACCESS_KEY_ID + "/" + credentialScope + ", SignedHeaders=" + signedHeaders + ", Signature=" + signature);
