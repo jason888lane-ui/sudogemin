@@ -161,7 +161,8 @@ def stripe_status():
     return {"status": "live_ready" if ready else "configuration_required",
             "mode": "live" if key.startswith("sk_live_") else "off",
             "checkout_enabled": ready,
-            "webhook_configured": bool(os.getenv("STRIPE_WEBHOOK_SECRET")),\n            "persistent_storage": database_ready()}
+            "webhook_configured": bool(os.getenv("STRIPE_WEBHOOK_SECRET")),
+            "persistent_storage": database_ready()}
 
 def quantum_status():
     enabled = os.getenv("CUDA_Q_ENABLED", "false").lower() == "true"
