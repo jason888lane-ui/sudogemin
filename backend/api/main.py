@@ -224,7 +224,7 @@ def quantum_status():
     enabled = os.getenv("CUDA_Q_ENABLED", "false").lower() == "true"
     ready = bool(cudaq and enabled)
     return {"status": "ready" if ready else ("package_missing" if enabled and not cudaq else "disabled"),
-            "backend": os.getenv("CUDA_Q_TARGET", "qpp"),
+            "backend": os.getenv("CUDA_Q_TARGET", "qpp-cpu"),
             "runtime": "CUDA-Q" if cudaq else "not_installed",
             "note": "qpp is a CPU simulator; NVIDIA GPU execution requires a CUDA-capable host."}
 
