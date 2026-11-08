@@ -10,8 +10,24 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements-cudaq.txt .
+RUN python -m pip install --upgrade pip \
+    && python -m pip install --no-cache-dir -r requirements-cudaq.txt
+
+# Fail the image build if CUDA-Q cannot import or execute on its CPU simulator.
+RUN python - <<'PY'
+import cudaq
+cudaq.set_target("qpp")
+@cudaq.kernel
+def bell_pair():
+    q = cudaq.qvector(2)
+    h(q[0])
+    x.ctrl(q[0], q[1])
+    mz(q)
+counts = cudaq.sample(bell_pair, shots_count=100)
+assert sum(counts.values()) == 100, counts
+print("CUDA-Q smoke test passed; target=qpp; shots=100; counts=" + str(counts))
+PY
 
 COPY main.py personal_intelligence.py ./
 
