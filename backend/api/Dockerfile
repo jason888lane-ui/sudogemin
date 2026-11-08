@@ -17,7 +17,7 @@ RUN python -m pip install --upgrade pip \
 # Fail the image build if CUDA-Q cannot import or execute on its CPU simulator.
 RUN python - <<'PY'
 import cudaq
-cudaq.set_target("qpp")
+cudaq.set_target("qpp-cpu")
 @cudaq.kernel
 def bell_pair():
     q = cudaq.qvector(2)
@@ -26,7 +26,7 @@ def bell_pair():
     mz(q)
 counts = cudaq.sample(bell_pair, shots_count=100)
 assert sum(counts.values()) == 100, counts
-print("CUDA-Q smoke test passed; target=qpp; shots=100; counts=" + str(counts))
+print("CUDA-Q smoke test passed; target=qpp-cpu; shots=100; counts=" + str(counts))
 PY
 
 COPY main.py personal_intelligence.py ./
