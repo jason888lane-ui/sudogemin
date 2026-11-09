@@ -1,0 +1,41 @@
+name: API CI
+
+on:
+  push:
+    branches: [production-hardening]
+    paths:
+      - "backend/api/**"
+      - ".github/workflows/api-ci.yml"
+  pull_request:
+    branches: [production-hardening]
+    paths:
+      - "backend/api/**"
+      - ".github/workflows/api-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend/api
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/api/requirements.txt
+      - name: Install API dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pytest httpx
+      - name: Compile application
+        run: python -m compileall -q main.py personal_intelligence.py tests
+      - name: Run API security and readiness tests
+        run: python -m unittest discover -s tests -v
