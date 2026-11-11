@@ -595,7 +595,8 @@ def create_subscription_checkout(item: SubscriptionCheckoutIn, request: Request)
             line_items=[{"price": price_id, "quantity": 1}],
             success_url=base + "/?billing=success&session_id={CHECKOUT_SESSION_ID}",
             cancel_url=base + "/?billing=cancelled", metadata={"product": "Sudogemini", "tenant_id": tid},
-            subscription_data={"metadata":{"tenant_id":tid,"product":"Sudogemini"}})
+            subscription_data={"metadata":{"tenant_id":tid,"product":"Sudogemini"}},
+            idempotency_key="sudogemini-subscription-"+tid)
         return {"checkout_url": session.url, "session_id": session.id, "mode": "subscription"}
     except Exception as exc:
         raise HTTPException(status_code=502, detail="Stripe checkout failed: " + type(exc).__name__)
@@ -612,7 +613,8 @@ def create_seller_onboarding(item: SellerOnboardingIn, request: Request):
         account_id=existing.get("stripe_account_id")
         if not account_id:
             account=sdk.Account.create(type="express",country="US",email=item.customer_email,
-                capabilities={"transfers":{"requested":True}},metadata={"tenant_id":tid})
+                capabilities={"transfers":{"requested":True}},metadata={"tenant_id":tid},
+                idempotency_key="sudogemini-connect-"+tid)
             account_id=account.id
             _subscriptions.update_item(Key={"tenant_id":tid},
                 UpdateExpression="SET stripe_account_id=:a, seller_onboarding_status=:s",
