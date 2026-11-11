@@ -1,0 +1,148 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Sudogemini governed ingestion, agent jobs, and marketplace supporting resources.
+Parameters:
+  TaskRoleName:
+    Type: String
+    Description: Existing ECS task role name used by the Sudogemini API and worker.
+  DataRetentionDays:
+    Type: Number
+    Default: 365
+    MinValue: 30
+    MaxValue: 2555
+Resources:
+  IngestionBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireStagedUploads
+            Status: Enabled
+            Prefix: incoming/
+            ExpirationInDays: !Ref DataRetentionDays
+  JobsDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+  PlatformJobsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 240
+      MessageRetentionPeriod: 345600
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt JobsDeadLetterQueue.Arn
+        maxReceiveCount: 4
+  AgentJobsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: tenant_id
+          AttributeType: S
+        - AttributeName: job_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: tenant_id
+          KeyType: HASH
+        - AttributeName: job_id
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+  MarketplaceTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: created_at_listing_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: status
+          KeyType: HASH
+        - AttributeName: created_at_listing_id
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+  StripeEventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: event_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: event_id
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+  SubscriptionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: tenant_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: tenant_id
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+  SudogeminiPlatformTaskPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: SudogeminiPlatformRuntime
+      Roles: [!Ref TaskRoleName]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: [s3:PutObject, s3:GetObject]
+            Resource: !Sub "\${IngestionBucket.Arn}/incoming/*"
+          - Effect: Allow
+            Action: [sqs:SendMessage, sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes]
+            Resource: !GetAtt PlatformJobsQueue.Arn
+          - Effect: Allow
+            Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:Query]
+            Resource:
+              - !GetAtt AgentJobsTable.Arn
+              - !GetAtt MarketplaceTable.Arn
+              - !GetAtt StripeEventsTable.Arn
+              - !GetAtt SubscriptionsTable.Arn
+          - Effect: Allow
+            Action: [bedrock:InvokeModel, bedrock:Converse]
+            Resource: "*"
+Outputs:
+  IngestionBucketName:
+    Value: !Ref IngestionBucket
+  PlatformJobsQueueUrl:
+    Value: !Ref PlatformJobsQueue
+  AgentJobsTableName:
+    Value: !Ref AgentJobsTable
+  MarketplaceTableName:
+    Value: !Ref MarketplaceTable
+  StripeEventsTableName:
+    Value: !Ref StripeEventsTable
+  SubscriptionsTableName:
+    Value: !Ref SubscriptionsTable
