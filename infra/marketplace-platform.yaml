@@ -148,8 +148,14 @@ Resources:
         Version: "2012-10-17"
         Statement:
           - Effect: Allow
-            Action: [s3:PutObject, s3:GetObject]
+            Action: [s3:PutObject]
             Resource: !Sub "\${IngestionBucket.Arn}/incoming/*"
+          - Effect: Allow
+            Action: [s3:GetObject, s3:DeleteObject]
+            Resource: !Sub "\${IngestionBucket.Arn}/incoming/*"
+          - Effect: Allow
+            Action: [s3:PutObject, s3:GetObject, s3:DeleteObject]
+            Resource: !Sub "\${IngestionBucket.Arn}/datasets/*"
           - Effect: Allow
             Action: [sqs:SendMessage, sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes]
             Resource: !GetAtt PlatformJobsQueue.Arn
