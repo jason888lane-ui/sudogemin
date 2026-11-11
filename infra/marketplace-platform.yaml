@@ -14,10 +14,10 @@ Parameters:
     Type: String
     Default: https://app.sudogemini.com
     Description: Exact HTTPS origin allowed to upload directly to the private S3 bucket.
-  DataRetentionDays:
+  StagingRetentionDays:
     Type: Number
-    Default: 365
-    MinValue: 30
+    Default: 7
+    MinValue: 1
     MaxValue: 2555
 Resources:
   IngestionBucket:
