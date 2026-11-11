@@ -254,7 +254,6 @@ Resources:
               awslogs-stream-prefix: worker
   WorkerService:
     Type: AWS::ECS::Service
-    DependsOn: WorkerTaskDefinition
     Properties:
       ServiceName: sudogemini-worker
       Cluster: !Ref WorkerClusterArn
