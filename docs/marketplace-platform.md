@@ -6,6 +6,11 @@ This branch adds the first code implementation for ingestion, queued AI workflow
 
 All endpoints under `/api` require a valid Cognito ID token, except the signed Stripe webhook.
 
+### Tenant identity boundary
+
+The API currently maps each verified Cognito `sub` to an isolated tenant. It deliberately ignores `custom:tenant_id` and other client-provided organization identifiers. This prevents an editable profile attribute from becoming an authorization boundary. The trade-off is that multiple users cannot yet share one organization workspace. Organization membership must be added through a server-controlled membership directory with administrator-only membership changes, audit history, and cross-tenant authorization tests. Do not re-enable custom-claim-based organization sharing until the user-pool schema and every app client's `WriteAttributes` permissions have been verified. AWS documents that app clients can have write access to custom attributes by default when `WriteAttributes` is not explicitly restricted; see [Cognito attribute permissions](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-settings-attributes.html).
+
+
 | Endpoint | Purpose | Gate |
 |---|---|---|
 | `POST /api/agents/run` | Queue one of six governed agent tasks | SQS + Bedrock worker configured |
