@@ -250,9 +250,16 @@ def require_platform_admin(request: Request) -> None:
 def dataset_review_queue(request: Request):
     require_platform_admin(request)
     try:
-        result = _datasets.scan(FilterExpression=Attr("license_status").eq("pending_review"), Limit=100)
-        return {"items": [{k:v for k,v in x.items() if k != "tenant_id"} for x in result.get("Items", [])],
-                "count": len(result.get("Items", []))}
+        items=[]
+        scan_args={"FilterExpression":Attr("license_status").eq("pending_review"),"Limit":100}
+        while len(items)<100:
+            result=_datasets.scan(**scan_args)
+            items.extend(result.get("Items",[]))
+            if not result.get("LastEvaluatedKey"):
+                break
+            scan_args["ExclusiveStartKey"]=result["LastEvaluatedKey"]
+        visible=[{k:v for k,v in x.items() if k!="tenant_id"} for x in items[:100]]
+        return {"items":visible,"count":len(visible)}
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Dataset review queue unavailable: "+type(exc).__name__)
 
@@ -260,9 +267,14 @@ def dataset_review_queue(request: Request):
 def approve_dataset(dataset_id: str, request: Request):
     require_platform_admin(request)
     try:
-        result = _datasets.scan(FilterExpression=Attr("record_id").eq(dataset_id), Limit=100)
-        matches = result.get("Items", [])
-        item = next((x for x in matches if x.get("license_status") == "pending_review"), None)
+        item=None
+        scan_args={"FilterExpression":Attr("record_id").eq(dataset_id),"Limit":100}
+        while True:
+            result=_datasets.scan(**scan_args)
+            item=next((x for x in result.get("Items",[]) if x.get("license_status")=="pending_review"),None)
+            if item or not result.get("LastEvaluatedKey"):
+                break
+            scan_args["ExclusiveStartKey"]=result["LastEvaluatedKey"]
         if not item:
             raise HTTPException(status_code=404, detail="Pending dataset not found.")
         if not item.get("license_evidence_url") or not item.get("permitted_use"):
