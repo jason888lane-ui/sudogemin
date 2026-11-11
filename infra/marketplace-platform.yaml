@@ -4,6 +4,12 @@ Parameters:
   TaskRoleName:
     Type: String
     Description: Existing ECS task role name used by the Sudogemini API and worker.
+  DatasetsTableArn:
+    Type: String
+    Description: ARN of the existing tenant-partitioned datasets DynamoDB table.
+  TradesTableArn:
+    Type: String
+    Description: ARN of the existing tenant-partitioned trades DynamoDB table.
   AppOrigin:
     Type: String
     Default: https://app.sudogemini.com
@@ -159,6 +165,12 @@ Resources:
           - Effect: Allow
             Action: [sqs:SendMessage, sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes]
             Resource: !GetAtt PlatformJobsQueue.Arn
+          - Effect: Allow
+            Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:Scan]
+            Resource: !Ref DatasetsTableArn
+          - Effect: Allow
+            Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem, dynamodb:Query]
+            Resource: !Ref TradesTableArn
           - Effect: Allow
             Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem, dynamodb:Query]
             Resource:
