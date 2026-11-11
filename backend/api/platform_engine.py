@@ -155,10 +155,28 @@ def run_agent(message: dict) -> dict:
     result["requires_human_approval"]=True; result["agent_id"]=agent_id
     return result
 
-def save_job_result(message: dict, result: dict, status: str="completed") -> None:
-    table_name=_required("AGENT_JOBS_TABLE")
-    table=boto3.resource("dynamodb",region_name=os.getenv("AWS_REGION","us-east-2")).Table(table_name)
-    table.update_item(Key={"tenant_id":message["tenant_id"],"job_id":message["job_id"]},
-        UpdateExpression="SET #s=:status, result_json=:result, completed_at=:at",
-        ExpressionAttributeNames={"#s":"status"},
-        ExpressionAttributeValues={":status":status,":result":json.dumps(result),":at":_now()})
+def save_job_result(
+    message: dict, result: dict, status: str = "completed",
+    lease_owner: str | None = None,
+) -> None:
+    """Persist an agent result, optionally fenced by the worker's current lease."""
+    table_name = _required("AGENT_JOBS_TABLE")
+    table = boto3.resource(
+        "dynamodb", region_name=os.getenv("AWS_REGION", "us-east-2")
+    ).Table(table_name)
+    args = {
+        "Key": {"tenant_id": message["tenant_id"], "job_id": message["job_id"]},
+        "UpdateExpression": (
+            "SET #s=:status, result_json=:result, completed_at=:at "
+            "REMOVE lease_owner, lease_expires_at"
+        ),
+        "ExpressionAttributeNames": {"#s": "status"},
+        "ExpressionAttributeValues": {
+            ":status": status, ":result": json.dumps(result), ":at": _now()
+        },
+    }
+    if lease_owner is not None:
+        args["ConditionExpression"] = "lease_owner = :owner AND #s = :running"
+        args["ExpressionAttributeValues"][":owner"] = lease_owner
+        args["ExpressionAttributeValues"][":running"] = "running"
+    table.update_item(**args)
