@@ -132,6 +132,19 @@ def digest(value: str) -> str:
 def merkle_root(payload: str) -> str:
     return digest(f"{SEED}:{payload}")
 
+def tenant_id_from_claims(claims: dict) -> str:
+    """Return the isolated tenant key for a verified Cognito ID token.
+
+    Organization sharing is deliberately disabled until membership is resolved by
+    a server-controlled directory. A custom claim is not an authorization source
+    unless its immutability and every app client's write permissions are proven.
+    """
+    subject = claims.get("sub")
+    if not isinstance(subject, str) or not subject.strip():
+        raise ValueError("Verified Cognito subject is required")
+    return subject
+
+
 def tenant(request: Request) -> str:
     value = getattr(request.state, "tenant_id", None)
     if not value:
@@ -158,11 +171,12 @@ async def cognito_authentication(request: Request, call_next):
             )
             if claims.get("token_use") != "id":
                 return _unauthorized()
-            # Users without an administrator-assigned organization claim get an isolated tenant keyed by verified Cognito sub.
-            # Never accept tenant IDs from request bodies or query parameters.
-            tenant_id = claims.get("custom:tenant_id") or claims["sub"]
-            if not isinstance(tenant_id, str) or not tenant_id.strip():
-                return _unauthorized()
+            # Until a server-side organization-membership directory is implemented,
+            # bind each Cognito subject to its own tenant. Do not trust custom tenant
+            # claims here: Cognito app-client write permissions and user-pool schema
+            # mutability must be verified before any organization claim can authorize
+            # access. Never accept tenant IDs from request bodies or query parameters.
+            tenant_id = tenant_id_from_claims(claims)
             request.state.tenant_id = tenant_id
             request.state.subject = claims["sub"]
         except Exception:
