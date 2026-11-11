@@ -183,13 +183,17 @@ Resources:
             Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem, dynamodb:Query]
             Resource: !Ref TradesTableArn
           - Effect: Allow
-            Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem, dynamodb:Query]
+            Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem]
             Resource:
               - !GetAtt AgentJobsTable.Arn
               - !GetAtt MarketplaceTable.Arn
               - !GetAtt StripeEventsTable.Arn
               - !GetAtt SubscriptionsTable.Arn
-              - !Sub "${SubscriptionsTable.Arn}/index/*"
+          - Effect: Allow
+            Action: [dynamodb:Query]
+            Resource:
+              - !Sub "${MarketplaceTable.Arn}/index/status-created-index"
+              - !Sub "${SubscriptionsTable.Arn}/index/subscription-id-index"
           - Effect: Allow
             Action: [bedrock:InvokeModel]
             Resource: "*"
