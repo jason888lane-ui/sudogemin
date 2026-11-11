@@ -284,7 +284,7 @@ def agents(request: Request):
         "count": len(AGENTS),
         "mode": "tenant_configurable_governed_autonomy",
         "controls": controls,
-        "note": "Autonomous mode executes queued low-risk agent jobs; human-in-the-loop mode waits for tenant approval. External high-impact actions remain policy-gated.",
+        "note": "Autonomous mode dispatches Bedrock planning and analysis jobs automatically; human-in-the-loop mode waits for tenant approval before dispatch. Current model agents return plans only and do not execute external business actions.",
     }
 
 
