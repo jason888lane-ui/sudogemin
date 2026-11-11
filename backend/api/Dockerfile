@@ -21,7 +21,7 @@ COPY requirements.txt ./
 RUN python -m pip install --upgrade pip \
     && python -m pip install --no-cache-dir -r requirements.txt
 
-COPY main.py personal_intelligence.py platform_engine.py worker.py ./
+COPY main.py personal_intelligence.py platform_engine.py quantum_engine.py worker.py ./
 COPY static ./static
 COPY --from=frontend /frontend/static/app.bundle.js ./static/app.bundle.js
 
