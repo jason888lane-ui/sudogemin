@@ -15,11 +15,11 @@ class IngestionValidationTests(unittest.TestCase):
 
     def test_csv_rejects_duplicate_headers(self):
         with self.assertRaisesRegex(ValueError, "unique"):
-            inspect_csv_or_json(b"company,Company\\nAcme,retail\\n", "text/csv")
+            inspect_csv_or_json(b"company,Company\nAcme,retail\n", "text/csv")
 
     def test_csv_rejects_rows_with_wrong_field_count(self):
         with self.assertRaisesRegex(ValueError, "same number of fields"):
-            inspect_csv_or_json(b"company,industry\\nAcme\\n", "text/csv")
+            inspect_csv_or_json(b"company,industry\nAcme\n", "text/csv")
 
     def test_json_lines_record_count(self):
         data = b'{"company":"Acme","industry":"retail"}\n{"company":"Northwind","industry":"software"}\n'
