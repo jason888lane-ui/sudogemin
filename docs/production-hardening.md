@@ -34,7 +34,7 @@ The existing API Gateway/Lambda data-exchange service is a separate, narrower se
 - The ALB listener on port 80 currently returns HTTP 503 with the message `TLS setup pending`.
 - No HTTPS listener has been installed yet.
 - A new ACM certificate has been requested for `sudogemini.com`, `www.sudogemini.com`, and `app.sudogemini.com`.
-- DNS validation CNAMEs have been written to the Route 53 hosted zone, but ACM still reports `PENDING_VALIDATION`. This usually means the public domain delegation does not yet point at this hosted zone, or public DNS has not propagated.
+- DNS validation CNAMEs have been written to the Route 53 hosted zone, but ACM still reports `PENDING_VALIDATION`. A public DNS query returned NXDOMAIN for `sudogemini.com` and `app.sudogemini.com`; a Verisign .com RDAP lookup returned HTTP 404 for `sudogemini.com`. The domain therefore appears not to be currently registered/active in the .com registry. The Route 53 hosted zone is only a DNS configuration and does not register or reserve the domain. Confirm the exact registered domain with the registrar, restore/renew it if expired or on hold, or register the desired domain before continuing.
 - The hosted zone's assigned name servers are:
   - `ns-931.awsdns-52.net`
   - `ns-1963.awsdns-53.co.uk`
