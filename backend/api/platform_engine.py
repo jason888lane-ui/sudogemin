@@ -175,6 +175,28 @@ def inspect_csv_or_json(data: bytes, content_type: str) -> dict:
 def process_ingestion(message: dict) -> dict:
     tenant_id, dataset_id, object_key = message["tenant_id"], message["dataset_id"], message["object_key"]
     bucket, table_name = _required("INGESTION_BUCKET"), _required("DATASETS_TABLE")
+    table = boto3.resource(
+        "dynamodb", region_name=os.getenv("AWS_REGION", "us-east-2")
+    ).Table(table_name)
+    # Recover the narrow crash window where the validated metadata was committed
+    # and the staging object deleted, but the worker died before acknowledging SQS.
+    existing = table.get_item(
+        Key={"tenant_id": tenant_id, "record_id": dataset_id},
+        ConsistentRead=True,
+    ).get("Item", {})
+    if (
+        existing.get("ingestion_status") == "validated"
+        and existing.get("ingestion_job_id") == message.get("job_id")
+        and existing.get("object_sha256")
+    ):
+        return {
+            "dataset_id": dataset_id,
+            "sha256": existing["object_sha256"],
+            "record_count": existing.get("ingested_record_count", 0),
+            "schema_sha256": existing.get("schema_sha256", ""),
+            "status": "validated",
+            "recovered": True,
+        }
     s3 = boto3.client("s3", region_name=os.getenv("AWS_REGION", "us-east-2"))
     obj = s3.get_object(Bucket=bucket, Key=object_key)
     content_type = obj.get("ContentType", "application/octet-stream")
@@ -210,7 +232,6 @@ def process_ingestion(message: dict) -> dict:
         CopySource={"Bucket":bucket,"Key":object_key},
         MetadataDirective="REPLACE", ContentType=content_type,
         Metadata={"sha256":digest,"tenant_id":tenant_id,"dataset_id":dataset_id})
-    table = boto3.resource("dynamodb", region_name=os.getenv("AWS_REGION", "us-east-2")).Table(table_name)
     try:
         table.update_item(Key={"tenant_id": tenant_id, "record_id": dataset_id},
             UpdateExpression=("SET ingestion_status=:done, object_key=:key, object_sha256=:digest, "
