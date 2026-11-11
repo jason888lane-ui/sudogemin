@@ -59,6 +59,11 @@ class ApiReadinessTests(unittest.TestCase):
         self.assertIn("Sudogemini Nexus", response.text)
         self.assertIn("Access your workspace", response.text)
 
+    def test_dashboard_module_is_served(self):
+        response = self.client.get("/platform.js")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("initPlatform", response.text)
+
     def test_dataset_cannot_self_approve_license(self):
         with self.assertRaises(Exception):
             main.DatasetIn(name="test dataset", license_status="approved")
