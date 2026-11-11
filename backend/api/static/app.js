@@ -16,6 +16,20 @@ $("signUp").onclick=async()=>{const email=$("signupEmail").value.trim(),password
 $("confirmSignUp").onclick=async()=>{try{await confirmSignUp({username:pendingEmail,confirmationCode:$("confirmCode").value.trim()});status("authStatus","Email verified. Sign in to continue.","good");$("loginEmail").value=pendingEmail;showAuth("signin")}catch(e){status("authStatus",e.message,"error")}};
 $("signIn").onclick=async()=>{try{await cognitoSignIn({username:$("loginEmail").value.trim(),password:$("loginPassword").value});await signedIn()}catch(e){status("authStatus",e.message,"error")}};
 $("logout").onclick=async()=>{await signOut();$("app").classList.add("hidden");$("auth").classList.remove("hidden");$("logout").classList.add("hidden");status("authStatus","Signed out.")};
+async function refreshAgentApprovals(){
+ try{
+  const data=await api("/api/agents/approvals");
+  const items=data.items||[];
+  $("agentApprovals").innerHTML=items.length?items.map(job=>'<div class="dataset"><b>'+escapeHtml(job.agent_id||"Agent")+'</b><small>'+escapeHtml(job.task||"")+'</small><small>Submitted: '+escapeHtml(new Date(Number(job.created_at||0)*1000).toLocaleString())+'</small><button class="btn primary" data-approve-agent="'+escapeHtml(job.job_id)+'">Approve and queue</button></div>').join(""):'No jobs are waiting for approval.';
+ }catch(e){$("agentApprovals").textContent=e.message}
+}
+$("refreshApprovals").onclick=refreshAgentApprovals;
+$("agentApprovals").addEventListener("click",async event=>{
+ const button=event.target.closest("[data-approve-agent]");if(!button)return;
+ button.disabled=true;
+ try{await api("/api/agents/jobs/"+encodeURIComponent(button.dataset.approveAgent)+"/approve",{method:"POST"});await refreshAgentApprovals();status("autonomyStatus","Human-approved job queued.","good")}
+ catch(e){button.disabled=false;status("autonomyStatus",e.message,"error")}
+});
 function renderAutonomy(controls){
  const pause=$("aiGlobalPause");
  pause.checked=!!controls.paused;
@@ -40,7 +54,7 @@ $("saveAutonomy").onclick=async()=>{
  }catch(e){status("autonomyStatus",e.message,"error")}
  finally{button.disabled=false}
 };
-async function refresh(){status("apiStatus","Refreshing workspace…");try{const [dash,agents,integrations,datasets]=await Promise.all([api("/api/dashboard"),api("/api/agents"),api("/api/integrations/status"),api("/api/datasets")]);$("agentCount").textContent=dash.agents;$("datasetCount").textContent=dash.datasets;$("tradeCount").textContent=dash.trades;$("quantumStatus").textContent=integrations.cuda_q.status;renderAutonomy(agents.controls||{modes:{},paused:false});$("agents").innerHTML=agents.agents.map(a=>'<article class="agent"><b>'+escapeHtml(a.name)+'</b><span>'+escapeHtml(a.role)+'</span></article>').join("");$("integrations").innerHTML='<div class="dataset"><b>Stripe</b><small>'+escapeHtml(integrations.stripe.status)+' · checkout '+(integrations.stripe.checkout_enabled?"enabled":"disabled")+'</small></div><div class="dataset"><b>CUDA-Q</b><small>'+escapeHtml(integrations.cuda_q.status)+' · '+escapeHtml(integrations.cuda_q.backend)+'</small></div>';renderDatasets(datasets.items);status("apiStatus","Workspace loaded.","good")}catch(e){status("apiStatus",e.message,"error")}}
+async function refresh(){status("apiStatus","Refreshing workspace…");try{const [dash,agents,integrations,datasets]=await Promise.all([api("/api/dashboard"),api("/api/agents"),api("/api/integrations/status"),api("/api/datasets")]);$("agentCount").textContent=dash.agents;$("datasetCount").textContent=dash.datasets;$("tradeCount").textContent=dash.trades;$("quantumStatus").textContent=integrations.cuda_q.status;renderAutonomy(agents.controls||{modes:{},paused:false});await refreshAgentApprovals();$("agents").innerHTML=agents.agents.map(a=>'<article class="agent"><b>'+escapeHtml(a.name)+'</b><span>'+escapeHtml(a.role)+'</span></article>').join("");$("integrations").innerHTML='<div class="dataset"><b>Stripe</b><small>'+escapeHtml(integrations.stripe.status)+' · checkout '+(integrations.stripe.checkout_enabled?"enabled":"disabled")+'</small></div><div class="dataset"><b>CUDA-Q</b><small>'+escapeHtml(integrations.cuda_q.status)+' · '+escapeHtml(integrations.cuda_q.backend)+'</small></div>';renderDatasets(datasets.items);status("apiStatus","Workspace loaded.","good")}catch(e){status("apiStatus",e.message,"error")}}
 function renderDatasets(items){$("datasets").innerHTML=items.length?items.map(d=>'<div class="dataset"><b>'+escapeHtml(d.name)+'</b> <span class="badge">'+escapeHtml(d.license_status||d.status||"pending_review")+'</span><small>'+escapeHtml(d.category||"general")+' · '+Number(d.record_count||0).toLocaleString()+' declared records</small><small>'+escapeHtml(d.description||"No description")+'</small></div>').join(""):'No datasets submitted yet.'}
 $("refresh").onclick=refresh;
 $("createDataset").onclick=async()=>{const b=$("createDataset");b.disabled=true;try{const item={name:$("datasetName").value.trim(),description:$("datasetDescription").value,category:$("datasetCategory").value.trim()||"general",source:$("datasetSource").value.trim()||"user-submitted",license_evidence_url:$("licenseEvidenceUrl").value.trim(),permitted_use:$("permittedUse").value.trim(),record_count:Number($("recordCount").value||0)};const created=await api("/api/datasets",{method:"POST",body:JSON.stringify(item)});status("datasetStatus","Submitted. Status: pending review.","good");$("datasetName").value="";await refresh()}catch(e){status("datasetStatus",e.message,"error")}finally{b.disabled=false}};
