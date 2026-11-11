@@ -19,6 +19,37 @@ Parameters:
     Default: 7
     MinValue: 1
     MaxValue: 2555
+  WorkerImageUri:
+    Type: String
+    Description: Immutable ECR image URI built from the approved release commit.
+  WorkerExecutionRoleArn:
+    Type: String
+    Description: Existing ECS task execution role ARN.
+  WorkerClusterArn:
+    Type: String
+    Description: Existing ECS cluster ARN.
+  WorkerSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets for the isolated Fargate worker service.
+  WorkerSecurityGroupIds:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    Description: Security groups allowing outbound access to SQS, S3, DynamoDB and Bedrock.
+  DatasetsTableName:
+    Type: String
+    Description: Name of the existing tenant-partitioned datasets table.
+  BedrockModelId:
+    Type: String
+    Description: Model or inference profile ID verified with Converse in this AWS account.
+  WorkerDesiredCount:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    MaxValue: 5
+    Description: Keep at zero until image, model access, network egress and cost are approved.
+  WorkerAssignPublicIp:
+    Type: String
+    Default: ENABLED
+    AllowedValues: [ENABLED, DISABLED]
 Resources:
   IngestionBucket:
     Type: AWS::S3::Bucket
@@ -172,6 +203,64 @@ Resources:
         SSEEnabled: true
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: true
+  WorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /ecs/sudogemini-worker
+      RetentionInDays: 30
+  WorkerTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: sudogemini-worker
+      Cpu: "512"
+      Memory: "1024"
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !Ref WorkerExecutionRoleArn
+      TaskRoleArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/${TaskRoleName}"
+      ContainerDefinitions:
+        - Name: worker
+          Image: !Ref WorkerImageUri
+          Essential: true
+          Command: ["python", "worker.py"]
+          Environment:
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: DATASETS_TABLE
+              Value: !Ref DatasetsTableName
+            - Name: INGESTION_BUCKET
+              Value: !Ref IngestionBucket
+            - Name: PLATFORM_JOBS_QUEUE_URL
+              Value: !Ref PlatformJobsQueue
+            - Name: AGENT_JOBS_TABLE
+              Value: !Ref AgentJobsTable
+            - Name: BEDROCK_MODEL_ID
+              Value: !Ref BedrockModelId
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref WorkerLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: worker
+  WorkerService:
+    Type: AWS::ECS::Service
+    DependsOn: WorkerTaskDefinition
+    Properties:
+      ServiceName: sudogemini-worker
+      Cluster: !Ref WorkerClusterArn
+      DesiredCount: !Ref WorkerDesiredCount
+      LaunchType: FARGATE
+      TaskDefinition: !Ref WorkerTaskDefinition
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: !Ref WorkerAssignPublicIp
+          Subnets: !Ref WorkerSubnetIds
+          SecurityGroups: !Ref WorkerSecurityGroupIds
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 100
   SudogeminiPlatformTaskPolicy:
     Type: AWS::IAM::Policy
     Properties:
@@ -231,3 +320,7 @@ Outputs:
     Value: !Ref StripeEventsTable
   SubscriptionsTableName:
     Value: !Ref SubscriptionsTable
+  WorkerServiceName:
+    Value: !GetAtt WorkerService.Name
+  WorkerTaskDefinitionArn:
+    Value: !Ref WorkerTaskDefinition
