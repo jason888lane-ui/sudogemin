@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from personal_intelligence import executive_guidance
+from platform_engine import create_upload_url, enqueue_job
 
 try:
     import stripe
@@ -39,6 +40,10 @@ _jwks_client = PyJWKClient(COGNITO_JWKS_URL, cache_keys=True) if COGNITO_JWKS_UR
 _dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
 _datasets = _dynamodb.Table(DATASETS_TABLE)
 _trades = _dynamodb.Table(TRADES_TABLE)
+_marketplace = _dynamodb.Table(os.getenv("MARKETPLACE_TABLE", "sudogemini-staging-marketplace"))
+_agent_jobs = _dynamodb.Table(os.getenv("AGENT_JOBS_TABLE", "sudogemini-agent-jobs"))
+_subscriptions = _dynamodb.Table(os.getenv("SUBSCRIPTIONS_TABLE", "sudogemini-subscriptions"))
+_stripe_events = _dynamodb.Table(os.getenv("STRIPE_EVENTS_TABLE", "sudogemini-stripe-events"))
 
 app = FastAPI(title=APP_NAME, version="1.2.0", description="Tenant-authenticated B2B data brokerage API")
 
@@ -69,6 +74,8 @@ class DatasetIn(BaseModel):
     category: str = Field(default="general", max_length=80)
     source: str = Field(default="user-submitted", max_length=200)
     record_count: int = Field(default=0, ge=0)
+    license_evidence_url: str = Field(default="", max_length=2000)
+    permitted_use: str = Field(default="", max_length=1000)
     license_status: Literal["pending_review"] = "pending_review"
 
 class MatchIn(BaseModel):
@@ -76,9 +83,23 @@ class MatchIn(BaseModel):
     requirements: list[str] = []
 
 class TradeIn(BaseModel):
-    buyer_id: str
-    dataset_id: str
-    amount_usd: float = Field(gt=0, le=1000000)
+    listing_id: str = Field(min_length=1, max_length=100)
+
+class ListingIn(BaseModel):
+    dataset_id: str = Field(min_length=1, max_length=100)
+    price_usd: float = Field(gt=0, le=1000000)
+    license_summary: str = Field(min_length=10, max_length=2000)
+
+class UploadUrlIn(BaseModel):
+    filename: str = Field(min_length=1, max_length=200)
+    content_type: str
+
+class AgentRunIn(BaseModel):
+    agent_id: Literal["ingestion", "quality", "scoping", "marketplace", "sales", "governance"]
+    task: str = Field(min_length=1, max_length=6000)
+
+class SubscriptionCheckoutIn(BaseModel):
+    customer_email: str = Field(min_length=5, max_length=254)
 
 def digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
@@ -173,7 +194,8 @@ def create_dataset(item: DatasetIn, request: Request):
     record_id = str(uuid.uuid4())
     record = item.model_dump()
     record.update({"id": record_id, "record_id": record_id, "tenant_id": tid,
-                   "status": "pending_review", "created_at": int(time.time())})
+                   "status": "pending_review", "license_status": "pending_review",
+                   "created_at": int(time.time())})
     _datasets.put_item(Item=record)
     return {k: v for k, v in record.items() if k != "tenant_id"}
 
@@ -198,9 +220,167 @@ def match_buyer(item: MatchIn, request: Request):
         results.append({"dataset": safe_ds, "match_score": round(score, 4), "matched_terms": hits})
     return {"buyer_id": item.buyer_id, "matches": sorted(results, key=lambda x: x["match_score"], reverse=True)}
 
-@app.post("/api/trades", status_code=503)
-def create_trade(item: TradeIn):
-    raise HTTPException(status_code=503, detail="Trading is disabled until authenticated approval, durable transaction, and payment reconciliation workflows are implemented.")
+def require_platform_admin(request: Request) -> None:
+    subject = getattr(request.state, "subject", "")
+    allowed = {x.strip() for x in os.getenv("PLATFORM_ADMIN_SUBS", "").split(",") if x.strip()}
+    if not subject or subject not in allowed:
+        raise HTTPException(status_code=403, detail="Platform administrator approval is required.")
+
+@app.post("/api/datasets/{dataset_id}/approve")
+def approve_dataset(dataset_id: str, request: Request):
+    require_platform_admin(request)
+    tid = tenant(request)
+    response = _datasets.get_item(Key={"tenant_id": tid, "record_id": dataset_id})
+    item = response.get("Item")
+    if not item:
+        raise HTTPException(status_code=404, detail="Dataset not found in this tenant.")
+    if not item.get("license_evidence_url") or not item.get("permitted_use"):
+        raise HTTPException(status_code=409, detail="License evidence URL and permitted-use statement are required.")
+    _datasets.update_item(Key={"tenant_id": tid, "record_id": dataset_id},
+        UpdateExpression="SET license_status=:approved, #s=:approved, approved_at=:at, approved_by=:actor",
+        ExpressionAttributeNames={"#s":"status"},
+        ExpressionAttributeValues={":approved":"approved",":at":int(time.time()),":actor":request.state.subject})
+    return {"dataset_id":dataset_id,"status":"approved","license_status":"approved"}
+
+@app.post("/api/ingestion/{dataset_id}/upload-url")
+def ingestion_upload_url(dataset_id: str, item: UploadUrlIn, request: Request):
+    tid = tenant(request)
+    dataset = _datasets.get_item(Key={"tenant_id":tid,"record_id":dataset_id}).get("Item")
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found.")
+    if dataset.get("status") != "approved" or dataset.get("license_status") != "approved":
+        raise HTTPException(status_code=409, detail="A platform administrator must approve documented data rights before upload.")
+    try:
+        return create_upload_url(tenant_id=tid,dataset_id=dataset_id,
+            filename=item.filename,content_type=item.content_type)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=503 if isinstance(exc,RuntimeError) else 422, detail=str(exc))
+
+@app.post("/api/ingestion/{dataset_id}/complete", status_code=202)
+def ingestion_complete(dataset_id: str, object_key: str, request: Request):
+    tid = tenant(request)
+    dataset = _datasets.get_item(Key={"tenant_id":tid,"record_id":dataset_id}).get("Item")
+    if not dataset or dataset.get("license_status") != "approved":
+        raise HTTPException(status_code=404, detail="Approved dataset not found.")
+    expected_prefix = f"incoming/{tid}/{dataset_id}/"
+    if not object_key.startswith(expected_prefix) or ".." in object_key:
+        raise HTTPException(status_code=422, detail="Object key is outside this tenant's dataset upload prefix.")
+    try:
+        job_id = enqueue_job("ingestion",{"tenant_id":tid,"dataset_id":dataset_id,"object_key":object_key})
+        _datasets.update_item(Key={"tenant_id":tid,"record_id":dataset_id},
+            UpdateExpression="SET ingestion_status=:queued, ingestion_job_id=:job",
+            ExpressionAttributeValues={":queued":"queued",":job":job_id})
+        return {"job_id":job_id,"status":"queued"}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503,detail=str(exc))
+
+@app.post("/api/agents/run", status_code=202)
+def run_agent(item: AgentRunIn, request: Request):
+    tid=tenant(request); job_id=str(uuid.uuid4())
+    record={"tenant_id":tid,"job_id":job_id,"agent_id":item.agent_id,
+            "status":"queued","task":item.task,"created_at":int(time.time()),
+            "requires_human_approval":True}
+    try:
+        _agent_jobs.put_item(Item=record,ConditionExpression="attribute_not_exists(job_id)")
+        queued_id=enqueue_job("agent",{"tenant_id":tid,"agent_id":item.agent_id,
+                                      "task":item.task,"job_id":job_id})
+        return {"job_id":queued_id,"status":"queued","requires_human_approval":True}
+    except Exception as exc:
+        try: _agent_jobs.delete_item(Key={"tenant_id":tid,"job_id":job_id})
+        except Exception: pass
+        raise HTTPException(status_code=503,detail="Agent queue is unavailable: "+type(exc).__name__)
+
+@app.get("/api/agents/jobs/{job_id}")
+def get_agent_job(job_id: str, request: Request):
+    tid=tenant(request)
+    job=_agent_jobs.get_item(Key={"tenant_id":tid,"job_id":job_id}).get("Item")
+    if not job: raise HTTPException(status_code=404,detail="Agent job not found.")
+    job.pop("tenant_id",None)
+    return job
+
+@app.get("/api/marketplace/listings")
+def marketplace_listings():
+    try:
+        result=_marketplace.query(KeyConditionExpression=Key("status").eq("approved"),
+            ScanIndexForward=False,Limit=100)
+        return {"items":result.get("Items",[]),"count":len(result.get("Items",[]))}
+    except Exception as exc:
+        raise HTTPException(status_code=503,detail="Marketplace catalog is not provisioned: "+type(exc).__name__)
+
+@app.post("/api/marketplace/listings",status_code=202)
+def create_listing(item: ListingIn,request: Request):
+    tid=tenant(request)
+    dataset=_datasets.get_item(Key={"tenant_id":tid,"record_id":item.dataset_id}).get("Item")
+    if not dataset or dataset.get("status")!="approved" or dataset.get("license_status")!="approved":
+        raise HTTPException(status_code=409,detail="Only approved, licensed datasets can be submitted for listing.")
+    listing_id=str(uuid.uuid4()); created=int(time.time())
+    record={"status":"pending_review","created_at_listing_id":f"{created:020d}#{listing_id}",
+        "listing_id":listing_id,"seller_tenant_id":tid,"dataset_id":item.dataset_id,
+        "title":dataset["name"],"description":dataset.get("description",""),
+        "category":dataset.get("category","general"),"price_usd":item.price_usd,
+        "license_summary":item.license_summary,"created_at":created}
+    try: _marketplace.put_item(Item=record)
+    except Exception as exc: raise HTTPException(status_code=503,detail="Marketplace is not provisioned: "+type(exc).__name__)
+    return {"listing_id":listing_id,"status":"pending_review"}
+
+@app.post("/api/marketplace/listings/{listing_id}/approve")
+def approve_listing(listing_id: str,request: Request):
+    require_platform_admin(request)
+    rows=_marketplace.query(KeyConditionExpression=Key("status").eq("pending_review"))
+    listing=next((x for x in rows.get("Items",[]) if x.get("listing_id")==listing_id),None)
+    if not listing: raise HTTPException(status_code=404,detail="Pending listing not found.")
+    _marketplace.delete_item(Key={"status":"pending_review","created_at_listing_id":listing["created_at_listing_id"]})
+    listing["status"]="approved"
+    _marketplace.put_item(Item=listing)
+    return {"listing_id":listing_id,"status":"approved"}
+
+@app.post("/api/trades",status_code=201)
+def create_trade(item: TradeIn,request: Request):
+    buyer_tid=tenant(request)
+    rows=_marketplace.query(KeyConditionExpression=Key("status").eq("approved"))
+    listing=next((x for x in rows.get("Items",[]) if x.get("listing_id")==item.listing_id),None)
+    if not listing: raise HTTPException(status_code=404,detail="Approved marketplace listing not found.")
+    if listing["seller_tenant_id"]==buyer_tid:
+        raise HTTPException(status_code=409,detail="A seller cannot purchase its own listing.")
+    trade_id=str(uuid.uuid4()); now=int(time.time())
+    payload={"trade_id":trade_id,"buyer_tenant_id":buyer_tid,
+        "seller_tenant_id":listing["seller_tenant_id"],"listing_id":item.listing_id,
+        "dataset_id":listing["dataset_id"],"amount_usd":float(listing["price_usd"])}
+    proof=json.dumps(payload,sort_keys=True,separators=(",",":"))
+    base={"id":trade_id,"buyer_id":buyer_tid,"dataset_id":listing["dataset_id"],
+        "listing_id":item.listing_id,"amount_usd":float(listing["price_usd"]),
+        "seller_tenant_id":listing["seller_tenant_id"],"buyer_tenant_id":buyer_tid,
+        "status":"pending_seller_approval","payment_status":"not_started",
+        "merkle_root":merkle_root(proof),"created_at":now}
+    seller_copy={**base,"record_id":"seller#"+trade_id,"role":"seller"}
+    buyer_copy={**base,"record_id":trade_id,"role":"buyer"}
+    try:
+        _trades.put_item(Item={**buyer_copy,"tenant_id":buyer_tid},
+            ConditionExpression="attribute_not_exists(record_id)")
+        _trades.put_item(Item={**seller_copy,"tenant_id":listing["seller_tenant_id"]},
+            ConditionExpression="attribute_not_exists(record_id)")
+    except Exception as exc:
+        try: _trades.delete_item(Key={"tenant_id":buyer_tid,"record_id":trade_id})
+        except Exception: pass
+        raise HTTPException(status_code=503,detail="Could not persist marketplace order: "+type(exc).__name__)
+    return {"trade_id":trade_id,"status":"pending_seller_approval","amount_usd":base["amount_usd"]}
+
+@app.post("/api/trades/{trade_id}/seller-approve")
+def seller_approve_trade(trade_id: str,request: Request):
+    seller_tid=tenant(request)
+    key={"tenant_id":seller_tid,"record_id":"seller#"+trade_id}
+    trade=_trades.get_item(Key=key).get("Item")
+    if not trade: raise HTTPException(status_code=404,detail="Seller order not found.")
+    if trade.get("role")!="seller" or trade.get("status")!="pending_seller_approval":
+        raise HTTPException(status_code=409,detail="Order is not awaiting seller approval.")
+    buyer_tid=trade["buyer_tenant_id"]
+    _trades.update_item(Key={"tenant_id":buyer_tid,"record_id":trade_id},
+        UpdateExpression="SET #s=:approved",ExpressionAttributeNames={"#s":"status"},
+        ExpressionAttributeValues={":approved":"approved_pending_payment"})
+    _trades.update_item(Key=key,UpdateExpression="SET #s=:approved",
+        ExpressionAttributeNames={"#s":"status"},
+        ExpressionAttributeValues={":approved":"approved_pending_payment"})
+    return {"trade_id":trade_id,"status":"approved_pending_payment"}
 
 @app.get("/api/trades")
 def list_trades(request: Request):
@@ -236,7 +416,9 @@ def stripe_status():
     return {"status": "live_ready" if ready else "configuration_required",
             "mode": "live" if key.startswith("sk_live_") else "off",
             "checkout_enabled": ready,
-            "webhook_configured": bool(os.getenv("STRIPE_WEBHOOK_SECRET"))}
+            "webhook_configured": bool(os.getenv("STRIPE_WEBHOOK_SECRET")),
+            "subscription_entitlements": bool(os.getenv("SUBSCRIPTIONS_TABLE")),
+            "idempotency_store": bool(os.getenv("STRIPE_EVENTS_TABLE"))}
 
 def quantum_status():
     enabled = os.getenv("CUDA_Q_ENABLED", "false").lower() == "true"
@@ -259,7 +441,8 @@ def integrations_status():
     return {"stripe": stripe_status(), "cuda_q": quantum_status()}
 
 @app.post("/api/billing/checkout")
-def create_subscription_checkout(item: CheckoutIn):
+def create_subscription_checkout(item: SubscriptionCheckoutIn, request: Request):
+    tid = tenant(request)
     sdk = require_live_stripe()
     price_id = os.getenv("STRIPE_PRICE_ID")
     if not price_id:
@@ -269,7 +452,8 @@ def create_subscription_checkout(item: CheckoutIn):
         session = sdk.checkout.Session.create(mode="subscription", customer_email=item.customer_email,
             line_items=[{"price": price_id, "quantity": 1}],
             success_url=base + "/?billing=success&session_id={CHECKOUT_SESSION_ID}",
-            cancel_url=base + "/?billing=cancelled", metadata={"product": "Sudogemini"})
+            cancel_url=base + "/?billing=cancelled", metadata={"product": "Sudogemini", "tenant_id": tid},
+            subscription_data={"metadata":{"tenant_id":tid,"product":"Sudogemini"}})
         return {"checkout_url": session.url, "session_id": session.id, "mode": "subscription"}
     except Exception as exc:
         raise HTTPException(status_code=502, detail="Stripe checkout failed: " + type(exc).__name__)
@@ -314,14 +498,63 @@ async def stripe_webhook(request: Request):
         raise HTTPException(status_code=400, detail="Invalid Stripe webhook signature or payload")
     event_type = event["type"]
     obj = event["data"]["object"]
-    if event_type == "checkout.session.completed":
+    event_id = event["id"]
+    try:
+        _stripe_events.put_item(Item={"event_id":event_id,"status":"processing","created_at":int(time.time()),
+            "expires_at":int(time.time())+60*60*24*90},
+            ConditionExpression="attribute_not_exists(event_id)")
+    except Exception:
+        # Duplicate deliveries are acknowledged only when the event record already exists.
+        existing = _stripe_events.get_item(Key={"event_id":event_id}).get("Item")
+        if existing:
+            return {"received":True,"duplicate":True,"event_type":event_type}
+        raise HTTPException(status_code=503,detail="Stripe event idempotency store is unavailable.")
+    try:
         metadata = obj.get("metadata") or {}
-        trade_id, tid = metadata.get("trade_id"), metadata.get("tenant_id")
-        if trade_id and tid:
-            _trades.update_item(Key={"tenant_id":tid,"record_id":trade_id},
-                UpdateExpression="SET payment_status=:paid, #s=:status",
-                ExpressionAttributeNames={"#s":"status"},
-                ExpressionAttributeValues={":paid":"paid",":status":"paid"})
+        if event_type == "checkout.session.completed":
+            trade_id, tid = metadata.get("trade_id"), metadata.get("tenant_id")
+            if trade_id and tid and obj.get("payment_status") == "paid":
+                trade = _trades.get_item(Key={"tenant_id":tid,"record_id":trade_id}).get("Item")
+                if trade and trade.get("status") == "approved_pending_payment":
+                    _trades.update_item(Key={"tenant_id":tid,"record_id":trade_id},
+                        UpdateExpression="SET payment_status=:paid, #s=:status, stripe_payment_intent=:pi",
+                        ExpressionAttributeNames={"#s":"status"},
+                        ExpressionAttributeValues={":paid":"paid",":status":"paid_pending_fulfillment",
+                            ":pi":obj.get("payment_intent","")})
+                    seller_tid = metadata.get("seller_tenant_id") or trade.get("seller_tenant_id")
+                    if seller_tid:
+                        _trades.update_item(Key={"tenant_id":seller_tid,"record_id":"seller#"+trade_id},
+                            UpdateExpression="SET payment_status=:paid, #s=:status",
+                            ExpressionAttributeNames={"#s":"status"},
+                            ExpressionAttributeValues={":paid":"paid",":status":"paid_pending_fulfillment"})
+            elif obj.get("mode") == "subscription" and tid:
+                _subscriptions.put_item(Item={"tenant_id":tid,"customer_id":obj.get("customer",""),
+                    "subscription_id":obj.get("subscription",""),"status":"checkout_completed_pending_webhook",
+                    "updated_at":int(time.time())})
+        elif event_type in ("customer.subscription.created","customer.subscription.updated","customer.subscription.deleted"):
+            tid = metadata.get("tenant_id")
+            if tid:
+                _subscriptions.put_item(Item={"tenant_id":tid,"customer_id":obj.get("customer",""),
+                    "subscription_id":obj.get("id",""),"status":obj.get("status","unknown"),
+                    "price_ids":[x.get("price",{}).get("id","") for x in obj.get("items",{}).get("data",[])],
+                    "current_period_end":obj.get("current_period_end",0),"cancel_at_period_end":bool(obj.get("cancel_at_period_end")),
+                    "updated_at":int(time.time())})
+        elif event_type in ("invoice.payment_failed","invoice.payment_succeeded"):
+            subscription_id = obj.get("subscription")
+            if subscription_id:
+                # Reconciliation worker can resolve tenant by subscription_id; never grant access from invoice payload alone.
+                _subscriptions.update_item(Key={"tenant_id":metadata.get("tenant_id","unresolved")},
+                    UpdateExpression="SET last_invoice_status=:s, last_invoice_id=:i, updated_at=:t",
+                    ExpressionAttributeValues={":s":"failed" if event_type.endswith("failed") else "paid",
+                        ":i":obj.get("id",""),":t":int(time.time())})
+        _stripe_events.update_item(Key={"event_id":event_id},
+            UpdateExpression="SET #s=:done, processed_at=:at",
+            ExpressionAttributeNames={"#s":"status"},
+            ExpressionAttributeValues={":done":"processed",":at":int(time.time())})
+    except Exception as exc:
+        try: _stripe_events.delete_item(Key={"event_id":event_id})
+        except Exception: pass
+        raise HTTPException(status_code=500,detail="Webhook processing failed; Stripe may retry: "+type(exc).__name__)
     return {"received": True, "event_type": event_type}
 
 @app.post("/api/quantum/match")
