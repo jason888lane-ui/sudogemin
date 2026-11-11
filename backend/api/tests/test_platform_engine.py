@@ -1,9 +1,10 @@
+import io
 import json
 import os
 import unittest
 from unittest.mock import patch, MagicMock
 
-from platform_engine import inspect_csv_or_json, enqueue_job, run_agent
+from platform_engine import inspect_csv_or_json, inspect_stream, enqueue_job, run_agent
 
 
 class IngestionValidationTests(unittest.TestCase):
@@ -47,6 +48,34 @@ class IngestionValidationTests(unittest.TestCase):
     def test_oversized_payload_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "100 MiB"):
             inspect_csv_or_json(b"x" * (100 * 1024 * 1024 + 1), "text/csv")
+
+
+    def test_streaming_csv_counts_records_and_preserves_schema(self):
+        source = io.BytesIO(b"company,industry\\nAcme,retail\\nNorthwind,software\\n")
+        result = inspect_stream(source, "text/csv")
+        self.assertEqual(result["record_count"], 2)
+        self.assertEqual(result["columns"], ["company", "industry"])
+
+    def test_streaming_ndjson_validates_each_record(self):
+        source = io.BytesIO(b'{"company":"Acme"}\\n{"company":"Northwind"}\\n')
+        result = inspect_stream(source, "application/x-ndjson")
+        self.assertEqual(result["record_count"], 2)
+
+    def test_streaming_ndjson_rejects_schema_drift(self):
+        source = io.BytesIO(b'{"company":"Acme"}\\n{"organization":"Northwind"}\\n')
+        with self.assertRaisesRegex(ValueError, "consistent schema"):
+            inspect_stream(source, "application/x-ndjson")
+
+    def test_streaming_csv_rejects_sensitive_columns(self):
+        source = io.BytesIO(b"company,email\\nAcme,person@example.com\\n")
+        with self.assertRaisesRegex(ValueError, "sensitive personal-data"):
+            inspect_stream(source, "text/csv")
+
+    def test_json_stream_path_has_explicit_10_mib_cap(self):
+        source = io.BytesIO(b" " * (10 * 1024 * 1024 + 1))
+        with self.assertRaisesRegex(ValueError, "10 MiB"):
+            inspect_stream(source, "application/json")
+
 
 
 class JobDispatchTests(unittest.TestCase):
