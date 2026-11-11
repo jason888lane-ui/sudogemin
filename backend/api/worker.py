@@ -108,7 +108,16 @@ def handle(message: dict, lease_owner: str) -> None:
         globally_paused = os.getenv("AI_GLOBAL_PAUSE", "false").lower() == "true"
         ai_enabled = bool(control.get("ai_enabled", True))
         human_approval_required = bool(control.get("human_approval_required", True))
-        if globally_paused or control.get("paused") or not ai_enabled or human_approval_required or mode != "autonomous":
+        # A human-approved job carries approved_by on its tenant-scoped record.
+        # Approval is a one-job authorization and must override the workspace's
+        # human-approval default, but never the emergency pause or AI master switch.
+        job_record = table.get_item(
+            Key={"tenant_id": message["tenant_id"], "job_id": message["job_id"]},
+            ConsistentRead=True,
+        ).get("Item") or {}
+        explicitly_approved = bool(job_record.get("approved_by"))
+        needs_approval = (human_approval_required or mode != "autonomous") and not explicitly_approved
+        if globally_paused or control.get("paused") or not ai_enabled or needs_approval:
             next_status = "paused" if (globally_paused or control.get("paused") or not ai_enabled) else "awaiting_approval"
             table.update_item(
                 Key={"tenant_id": message["tenant_id"], "job_id": message["job_id"]},
