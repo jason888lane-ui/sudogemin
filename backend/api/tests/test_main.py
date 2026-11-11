@@ -49,6 +49,12 @@ class ApiReadinessTests(unittest.TestCase):
         response = self.client.post("/api/billing/webhook", content=b"{}")
         self.assertEqual(response.status_code, 503)
 
+    def test_dynamodb_transaction_item_serialization_preserves_tenant_keys(self):
+        encoded = main._ddb_item({"tenant_id": "tenant-a", "record_id": "order-1", "amount": main.Decimal("12.34")})
+        self.assertEqual(encoded["tenant_id"], {"S": "tenant-a"})
+        self.assertEqual(encoded["record_id"], {"S": "order-1"})
+        self.assertEqual(encoded["amount"], {"N": "12.34"})
+
     def test_digest_is_deterministic(self):
         self.assertEqual(main.digest("sudogemini"), main.digest("sudogemini"))
         self.assertNotEqual(main.digest("sudogemini"), main.digest("different"))
