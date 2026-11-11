@@ -729,7 +729,7 @@ async def stripe_webhook(request: Request):
                     charge = stripe.Charge.retrieve(obj.get("charge"))
                     payment_intent_id = charge.get("payment_intent")
                 if payment_intent_id and stripe:
-                    stripe.api_key = os.getenv("STRIPE_LIVE_SECRET_KEY", "")
+                    stripe.api_key = stripe_configuration()["key"]
                     intent = stripe.PaymentIntent.retrieve(payment_intent_id)
                     metadata = intent.get("metadata") or {}
                     trade_id, tid = metadata.get("trade_id"), metadata.get("tenant_id")
