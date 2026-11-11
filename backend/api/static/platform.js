@@ -77,7 +77,13 @@ export async function initPlatform({api,status,escapeHtml}) {
       const result = await api("/api/agents/run",{method:"POST",body:JSON.stringify({
         agent_id:$("agentRole").value, task:$("agentTask").value.trim()
       })});
-      status("agentTaskStatus","Queued job "+result.job_id+". Waiting for the worker…","good");watchAgentJob(result.job_id);
+      if(result.status==="awaiting_approval"){
+        status("agentTaskStatus","Job "+result.job_id+" is waiting in the Human approval queue.","good");
+        await refreshAgentApprovals();
+      }else{
+        status("agentTaskStatus","Autonomous job "+result.job_id+" queued. Waiting for the worker…","good");
+        watchAgentJob(result.job_id);
+      }
     } catch(e) { status("agentTaskStatus",e.message,"error"); }
   };
 
