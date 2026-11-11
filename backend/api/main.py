@@ -263,7 +263,7 @@ def approve_dataset(dataset_id: str, request: Request):
         _datasets.update_item(Key={"tenant_id": owner_tid, "record_id": dataset_id},
             UpdateExpression="SET license_status=:approved, #s=:approved, approved_at=:at, approved_by=:actor",
             ExpressionAttributeNames={"#s":"status"},
-            ExpressionAttributeValues={":approved":"approved",":at":int(time.time()),":actor":request.state.subject},
+            ExpressionAttributeValues={":approved":"approved",":pending":"pending_review",":at":int(time.time()),":actor":request.state.subject},
             ConditionExpression="license_status = :pending",
             )
         return {"dataset_id":dataset_id,"tenant_id":owner_tid,"status":"approved","license_status":"approved"}
