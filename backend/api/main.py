@@ -402,6 +402,16 @@ def approve_agent_job(job_id: str, request: Request):
     except ClientError as exc:
         if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
             raise HTTPException(status_code=409, detail="Job is not awaiting approval.")
+        try:
+            _agent_jobs.update_item(
+                Key={"tenant_id": tid, "job_id": job_id},
+                UpdateExpression="SET #s=:awaiting",
+                ConditionExpression="#s=:queued",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={":awaiting": "awaiting_approval", ":queued": "queued"},
+            )
+        except Exception:
+            pass
         raise HTTPException(status_code=503, detail="Could not approve agent job.")
     except Exception as exc:
         try:
