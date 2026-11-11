@@ -8,12 +8,14 @@ All endpoints under `/api` require a valid Cognito ID token, except the signed S
 
 ### Tenant identity boundary
 
-The API currently maps each verified Cognito `sub` to an isolated tenant. It deliberately ignores `custom:tenant_id` and other client-provided organization identifiers. This prevents an editable profile attribute from becoming an authorization boundary. The trade-off is that multiple users cannot yet share one organization workspace. Organization membership must be added through a server-controlled membership directory with administrator-only membership changes, audit history, and cross-tenant authorization tests. Do not re-enable custom-claim-based organization sharing until the user-pool schema and every app client's `WriteAttributes` permissions have been verified. AWS documents that app clients can have write access to custom attributes by default when `WriteAttributes` is not explicitly restricted; see [Cognito attribute permissions](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-settings-attributes.html).
+The API currently maps each verified Cognito `sub` to an isolated tenant. It deliberately ignores `custom:tenant_id` and other client-provided organization identifiers. This prevents an editable profile attribute from becoming an authorization boundary. The trade-off is that multiple users cannot yet share one organization workspace. Organization membership is now resolved through a server-controlled DynamoDB directory when `TENANT_MEMBERSHIPS_TABLE` is configured. Only subjects in `PLATFORM_ADMIN_SUBS` can create or revoke mappings through the admin endpoints; records are keyed by Cognito `sub`, writes are conditional, and revoked members fall back to their isolated subject tenant. Membership assignment is not self-service. This initial directory stores the current mapping and revocation metadata; a separate immutable audit/event history and organization-owner role model remain future hardening. Do not re-enable custom-claim-based organization sharing until the user-pool schema and every app client's `WriteAttributes` permissions have been verified. AWS documents that app clients can have write access to custom attributes by default when `WriteAttributes` is not explicitly restricted; see [Cognito attribute permissions](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-settings-attributes.html).
 
 
 | Endpoint | Purpose | Gate |
 |---|---|---|
 | `POST /api/agents/run` | Queue one of six governed agent tasks | SQS + Bedrock worker configured |
+| `POST /api/admin/tenant-memberships` | Assign a Cognito subject to an organization tenant | `PLATFORM_ADMIN_SUBS`; membership table configured |
+| `DELETE /api/admin/tenant-memberships/{member_sub}` | Revoke an organization membership | `PLATFORM_ADMIN_SUBS`; membership table configured |
 | `GET /api/agents/jobs/{job_id}` | Read the tenant-owned job result | Tenant-scoped DynamoDB key |
 | `POST /api/datasets` | Submit dataset metadata and rights evidence | Always pending review |
 | `POST /api/datasets/{id}/approve` | Approve dataset rights | Subject must be in `PLATFORM_ADMIN_SUBS` |
@@ -65,7 +67,7 @@ Review and deploy `infra/marketplace-platform.yaml` after confirming account, re
 Configure these environment values from CloudFormation outputs:
 - `INGESTION_BUCKET`
 - `PLATFORM_JOBS_QUEUE_URL`
-- `AGENT_JOBS_TABLE`
+- `AGENT_JOBS_TABLE`, `TENANT_MEMBERSHIPS_TABLE`
 - `MARKETPLACE_TABLE`
 - `STRIPE_EVENTS_TABLE`
 - `SUBSCRIPTIONS_TABLE`
