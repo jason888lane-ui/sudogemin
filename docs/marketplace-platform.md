@@ -37,7 +37,7 @@ The six roles are ingestion, quality, customer scoping, marketplace, sales, and 
 5. The API queues a job. The worker reads the object, calculates SHA-256, checks file structure and schema, counts records, and stores provenance metadata.
 6. Files with common sensitive-data columns such as email, phone, SSN, passport, or bank account fields are rejected for separate legal/security review.
 
-The initial worker has a 100 MiB processing limit and holds the complete file in memory during validation. This is an MVP constraint, not the final architecture for billion-record scale. Large-scale ingestion needs streaming/multipart processing, partitioned columnar storage, Glue/EMR or equivalent distributed processing, malware scanning, content inspection, retention enforcement, and a documented deletion workflow.
+After validation, the worker promotes the object from the expiring `incoming/` prefix to an immutable content-addressed `datasets/` key and updates dataset metadata to that retained key. The initial worker has a 100 MiB processing limit and holds the complete file in memory during validation. This is an MVP constraint, not the final architecture for billion-record scale. Large-scale ingestion needs streaming/multipart processing, partitioned columnar storage, Glue/EMR or equivalent distributed processing, malware scanning, content inspection, retention enforcement, and a documented deletion workflow.
 
 The header-based sensitive-data check is only a guardrail; it is not a legal determination or a complete PII detector. Do not upload regulated or sensitive personal data until a dedicated review and control program is implemented.
 
@@ -54,7 +54,7 @@ This implementation does not create a Stripe product/price, connect a seller, ac
 
 ## AWS resources and runtime configuration
 
-Review and deploy `infra/marketplace-platform.yaml` after confirming account, region, task role, and expected AWS costs. It provisions a private encrypted/versioned S3 bucket, SQS queue + DLQ, and DynamoDB tables for marketplace listings, agent jobs, Stripe events, and subscriptions. It attaches a runtime policy to the supplied ECS task role. These resources are not deployed by this PR.
+Review and deploy `infra/marketplace-platform.yaml` after confirming account, region, task role, existing datasets/trades table ARNs, and expected AWS costs. Supply `DatasetsTableArn` and `TradesTableArn` as stack parameters. It provisions a private encrypted/versioned S3 bucket, SQS queue + DLQ, and DynamoDB tables for marketplace listings, agent jobs, Stripe events, and subscriptions. It attaches a runtime policy to the supplied ECS task role. These resources are not deployed by this PR.
 
 Configure these environment values from CloudFormation outputs:
 - `INGESTION_BUCKET`
