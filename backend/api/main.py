@@ -484,7 +484,7 @@ def create_seller_onboarding(item: SellerOnboardingIn, request: Request):
         account_id=existing.get("stripe_account_id")
         if not account_id:
             account=sdk.Account.create(type="express",country="US",email=item.customer_email,
-                capabilities={"transfers":{"requested":True}})
+                capabilities={"transfers":{"requested":True}},metadata={"tenant_id":tid})
             account_id=account.id
             _subscriptions.update_item(Key={"tenant_id":tid},
                 UpdateExpression="SET stripe_account_id=:a, seller_onboarding_status=:s",
@@ -509,8 +509,8 @@ def create_trade_checkout(trade_id: str, request: Request):
     seller_tid = trade.get("seller_tenant_id")
     seller = _subscriptions.get_item(Key={"tenant_id":seller_tid}).get("Item") if seller_tid else None
     connected_account = (seller or {}).get("stripe_account_id")
-    if not connected_account:
-        raise HTTPException(status_code=409,detail="Seller must complete Stripe Connect onboarding before checkout.")
+    if not connected_account or not seller.get("charges_enabled") or not seller.get("payouts_enabled"):
+        raise HTTPException(status_code=409,detail="Seller must complete Stripe Connect onboarding and enable charges and payouts before checkout.")
     amount_cents = int(round(float(trade["amount_usd"])*100))
     fee_percent = float(os.getenv("MARKETPLACE_FEE_PERCENT","10"))
     if fee_percent < 0 or fee_percent > 30:
@@ -522,7 +522,8 @@ def create_trade_checkout(trade_id: str, request: Request):
             line_items=[{"price_data":{"currency":"usd","unit_amount":amount_cents,
             "product_data":{"name":"Sudogemini dataset purchase "+trade["dataset_id"]}},"quantity":1}],
             payment_intent_data={"application_fee_amount":application_fee,
-                "transfer_data":{"destination":connected_account}},
+                "transfer_data":{"destination":connected_account},
+                "metadata":{"trade_id":trade_id,"tenant_id":tid,"seller_tenant_id":seller_tid}},
             success_url=base+"/?trade="+trade_id+"&payment=success",
             cancel_url=base+"/?trade="+trade_id+"&payment=cancelled",
             metadata={"trade_id":trade_id,"tenant_id":tid,"seller_tenant_id":seller_tid,
@@ -584,6 +585,13 @@ async def stripe_webhook(request: Request):
                 _subscriptions.put_item(Item={"tenant_id":tid,"customer_id":obj.get("customer",""),
                     "subscription_id":obj.get("subscription",""),"status":"checkout_completed_pending_webhook",
                     "updated_at":int(time.time())})
+        elif event_type == "account.updated":
+            tid = metadata.get("tenant_id")
+            if tid:
+                _subscriptions.update_item(Key={"tenant_id":tid},
+                    UpdateExpression="SET charges_enabled=:c, payouts_enabled=:p, seller_onboarding_status=:s, updated_at=:t",
+                    ExpressionAttributeValues={":c":bool(obj.get("charges_enabled")),":p":bool(obj.get("payouts_enabled")),
+                        ":s":"complete" if obj.get("details_submitted") and obj.get("payouts_enabled") else "incomplete",":t":int(time.time())})
         elif event_type in ("customer.subscription.created","customer.subscription.updated","customer.subscription.deleted"):
             tid = metadata.get("tenant_id")
             if tid:
@@ -593,17 +601,22 @@ async def stripe_webhook(request: Request):
                     "current_period_end":obj.get("current_period_end",0),"cancel_at_period_end":bool(obj.get("cancel_at_period_end")),
                     "updated_at":int(time.time())})
         elif event_type in ("charge.refunded","charge.dispute.created"):
-            payment_intent=obj.get("payment_intent")
-            if payment_intent:
-                # Mark matching orders for manual review; never auto-release disputed or refunded data.
-                candidates=_trades.scan(FilterExpression="stripe_payment_intent = :pi",
-                    ExpressionAttributeValues={":pi":payment_intent}).get("Items",[])
-                for trade in candidates:
-                    _trades.update_item(Key={"tenant_id":trade["tenant_id"],"record_id":trade["record_id"]},
+            trade_id, tid = metadata.get("trade_id"), metadata.get("tenant_id")
+            if trade_id and tid:
+                state = "refund_review" if event_type == "charge.refunded" else "dispute_review"
+                payment_state = "refunded" if event_type == "charge.refunded" else "disputed"
+                trade = _trades.get_item(Key={"tenant_id":tid,"record_id":trade_id}).get("Item")
+                if trade:
+                    _trades.update_item(Key={"tenant_id":tid,"record_id":trade_id},
                         UpdateExpression="SET #s=:s, payment_status=:p",
                         ExpressionAttributeNames={"#s":"status"},
-                        ExpressionAttributeValues={":s":"refund_review" if event_type=="charge.refunded" else "dispute_review",
-                            ":p":"refunded" if event_type=="charge.refunded" else "disputed"})
+                        ExpressionAttributeValues={":s":state,":p":payment_state})
+                    seller_tid=trade.get("seller_tenant_id")
+                    if seller_tid:
+                        _trades.update_item(Key={"tenant_id":seller_tid,"record_id":"seller#"+trade_id},
+                            UpdateExpression="SET #s=:s, payment_status=:p",
+                            ExpressionAttributeNames={"#s":"status"},
+                            ExpressionAttributeValues={":s":state,":p":payment_state})
         elif event_type in ("invoice.payment_failed","invoice.payment_succeeded"):
             subscription_id = obj.get("subscription")
             if subscription_id:
