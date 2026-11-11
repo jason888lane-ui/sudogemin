@@ -85,5 +85,28 @@ class WorkerLeaseTests(unittest.TestCase):
         get_table.assert_not_called()
 
 
+    @patch("worker.boto3.resource")
+    @patch("worker._jobs_table")
+    @patch.dict("os.environ", {"DATASETS_TABLE": "datasets"})
+    def test_terminal_ingestion_failure_marks_dataset_only_for_matching_job(
+        self, get_table, resource
+    ):
+        get_table.return_value = self.table
+        dataset_table = MagicMock()
+        resource.return_value.Table.return_value = dataset_table
+        message = {
+            **self.message, "kind": "ingestion", "dataset_id": "dataset-a"
+        }
+        mark_terminal_failure(message, ValueError("invalid file"), "owner-1")
+        kwargs = dataset_table.update_item.call_args.kwargs
+        self.assertEqual(kwargs["Key"], {
+            "tenant_id": "tenant-a", "record_id": "dataset-a"
+        })
+        self.assertIn("ingestion_job_id = :job", kwargs["ConditionExpression"])
+        self.assertEqual(kwargs["ExpressionAttributeValues"][":job"], "job-a")
+        self.assertEqual(kwargs["ExpressionAttributeValues"][":failed"], "failed")
+
+
+
 if __name__ == "__main__":
     unittest.main()
