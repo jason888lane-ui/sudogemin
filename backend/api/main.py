@@ -559,11 +559,11 @@ def create_trade_checkout(trade_id: str, request: Request):
     fee_raw = os.getenv("MARKETPLACE_FEE_PERCENT","").strip()
     if not fee_raw:
         raise HTTPException(status_code=503,detail="MARKETPLACE_FEE_PERCENT must be explicitly configured.")
-    try: fee_percent = float(fee_raw)
-    except ValueError: raise HTTPException(status_code=503,detail="Marketplace fee configuration is invalid.")
-    if fee_percent < 0 or fee_percent > 30:
+    try: fee_percent = Decimal(fee_raw)
+    except Exception: raise HTTPException(status_code=503,detail="Marketplace fee configuration is invalid.")
+    if not fee_percent.is_finite() or fee_percent < 0 or fee_percent > 30:
         raise HTTPException(status_code=503,detail="Marketplace fee configuration is invalid.")
-    application_fee = int(round(amount_cents*fee_percent/100))
+    application_fee = int((Decimal(amount_cents)*fee_percent/Decimal(100)).quantize(Decimal("1"),rounding=ROUND_HALF_UP))
     base = os.getenv("APP_BASE_URL", "http://localhost:8000").rstrip("/")
     try:
         session = sdk.checkout.Session.create(mode="payment",payment_method_types=["card"],
