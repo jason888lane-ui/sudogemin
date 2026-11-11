@@ -663,6 +663,19 @@ async def stripe_webhook(request: Request):
                         ":t":int(time.time())})
         elif event_type in ("charge.refunded","charge.dispute.created"):
             trade_id, tid = metadata.get("trade_id"), metadata.get("tenant_id")
+            # Charge and dispute event objects do not consistently carry PaymentIntent
+            # metadata. Resolve the PaymentIntent metadata before changing an order.
+            if not (trade_id and tid):
+                payment_intent_id = obj.get("payment_intent")
+                if not payment_intent_id and obj.get("charge") and stripe:
+                    stripe.api_key = os.getenv("STRIPE_LIVE_SECRET_KEY", "")
+                    charge = stripe.Charge.retrieve(obj.get("charge"))
+                    payment_intent_id = charge.get("payment_intent")
+                if payment_intent_id and stripe:
+                    stripe.api_key = os.getenv("STRIPE_LIVE_SECRET_KEY", "")
+                    intent = stripe.PaymentIntent.retrieve(payment_intent_id)
+                    metadata = intent.get("metadata") or {}
+                    trade_id, tid = metadata.get("trade_id"), metadata.get("tenant_id")
             if trade_id and tid:
                 state = "refund_review" if event_type == "charge.refunded" else "dispute_review"
                 payment_state = "refunded" if event_type == "charge.refunded" else "disputed"
