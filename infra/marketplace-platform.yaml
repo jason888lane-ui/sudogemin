@@ -202,10 +202,12 @@ Resources:
             Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem]
             Resource:
               - !GetAtt AgentJobsTable.Arn
-              - !GetAtt TenantMembershipsTable.Arn
               - !GetAtt MarketplaceTable.Arn
               - !GetAtt StripeEventsTable.Arn
               - !GetAtt SubscriptionsTable.Arn
+          - Effect: Allow
+            Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem]
+            Resource: !GetAtt TenantMembershipsTable.Arn
           - Effect: Allow
             Action: [dynamodb:Query]
             Resource:
