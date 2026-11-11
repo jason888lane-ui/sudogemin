@@ -30,6 +30,9 @@ class ApiReadinessTests(unittest.TestCase):
         response = self.client.get("/health")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
+        self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+        self.assertEqual(response.headers["x-frame-options"], "DENY")
+        self.assertEqual(response.headers["cache-control"], "no-store")
 
     def test_api_fails_closed_when_cognito_is_not_configured(self):
         response = self.client.get("/api/agents")
