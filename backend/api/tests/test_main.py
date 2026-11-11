@@ -38,6 +38,23 @@ class ApiReadinessTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertIn("Authentication provider", response.json()["detail"])
 
+
+    def test_membership_directory_outage_returns_503_not_401(self):
+        from types import SimpleNamespace
+        jwks = MagicMock()
+        jwks.get_signing_key_from_jwt.return_value = SimpleNamespace(key="test-key")
+        with patch.object(main, "_jwks_client", jwks), \
+             patch.object(main, "COGNITO_CLIENT_ID", "client-id"), \
+             patch.object(main, "COGNITO_ISSUER", "https://issuer.example"), \
+             patch("main.jwt.decode", return_value={"sub": "user-a", "token_use": "id"}), \
+             patch("main.resolve_tenant_id", side_effect=RuntimeError("DynamoDB unavailable")):
+            response = self.client.get(
+                "/api/agents", headers={"Authorization": "Bearer test-token"}
+            )
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("membership service", response.json()["detail"])
+
+
     def test_dataset_api_fails_closed_without_identity_provider(self):
         response = self.client.get("/api/datasets")
         self.assertEqual(response.status_code, 503)
