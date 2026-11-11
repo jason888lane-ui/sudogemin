@@ -48,16 +48,29 @@ def inspect_csv_or_json(data: bytes, content_type: str) -> dict:
     text = data.decode("utf-8-sig")
     if content_type == "text/csv":
         reader = csv.DictReader(io.StringIO(text)); columns = reader.fieldnames or []
+        if not columns: raise ValueError("CSV header row is required")
         row_count = sum(1 for _ in reader)
+        if row_count < 1: raise ValueError("The uploaded dataset contains no records")
+    elif content_type == "application/json":
+        parsed = json.loads(text)
+        records = [parsed] if isinstance(parsed, dict) else parsed if isinstance(parsed, list) else None
+        if records is None or not records or not all(isinstance(x, dict) for x in records):
+            raise ValueError("JSON must contain an object or a non-empty array of objects")
+        columns = list(records[0].keys())
+        if any(set(x.keys()) != set(columns) for x in records):
+            raise ValueError("JSON records must have a consistent schema")
+        row_count = len(records)
     else:
         lines = [line for line in text.splitlines() if line.strip()]
         if not lines: raise ValueError("The uploaded file is empty")
         first = json.loads(lines[0])
-        if not isinstance(first, dict): raise ValueError("JSON/NDJSON records must be objects")
+        if not isinstance(first, dict): raise ValueError("NDJSON records must be objects")
         columns = list(first.keys()); row_count = 0
+        expected = set(columns)
         for line in lines:
             item = json.loads(line)
-            if not isinstance(item, dict): raise ValueError("Every JSON/NDJSON record must be an object")
+            if not isinstance(item, dict): raise ValueError("Every NDJSON record must be an object")
+            if set(item.keys()) != expected: raise ValueError("NDJSON records must have a consistent schema")
             row_count += 1
     normalized = {re.sub(r"[^a-z0-9_]", "_", str(c).lower()) for c in columns}
     sensitive = sorted(normalized.intersection(_SENSITIVE_HEADERS))
