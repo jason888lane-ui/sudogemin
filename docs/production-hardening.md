@@ -1,50 +1,71 @@
 # Sudogemini production hardening and AWS architecture
 
-## Executive status
+## Current implementation status
 
-The repository is a FastAPI prototype, not a production B2B marketplace. Keep the existing service running only as a development/test scaffold until the release gates below are complete.
+The staging application now has:
+- Cognito JWT verification using the configured user pool, app client, issuer, and JWKS.
+- Tenant-scoped DynamoDB dataset and trade queries.
+- An isolated default tenant ID derived from the verified Cognito `sub` claim when no administrator-assigned `custom:tenant_id` claim exists. Clients cannot choose tenant IDs in request bodies.
+- A static Cognito sign-up/sign-in dashboard served by FastAPI.
+- Dataset metadata registration with a server-enforced `pending_review` license state.
+- A six-role workflow catalogue and integration-status endpoints.
+- Stripe checkout and signed webhook scaffolding, with live billing disabled.
+- An optional CUDA-Q package and CPU-simulator smoke test.
 
-### Verified code facts
+The dashboard and API are a staging MVP, not a fully operational enterprise data brokerage. Dataset registration stores metadata only; it does not fetch or ingest source records. The six agent entries are workflow responsibilities, not six independent autonomous model workers. Trading remains deliberately disabled. No paid customer access or payment entitlement should be enabled yet.
 
-- Six agent roles are declared in `backend/api/main.py`; they are workflow descriptions, not independently deployed autonomous agents.
-- Dataset and trade records live in Python dictionaries. A process restart loses them, and multiple service instances will not share state.
-- The API currently has no authentication, authorization, or tenant isolation.
-- Dataset registration accepts a caller-supplied source and license status but does not verify either.
-- Trade creation requires a boolean `human_approved` supplied in the request. A caller-controlled boolean is not a valid approval workflow.
-- Merkle-style hashes are generated, but the current helper is a SHA-256 digest of a seeded payload, not a full Merkle tree with inclusion proofs or an externally anchored immutable ledger.
-- Stripe checkout endpoints exist, but payment processing must not be considered production-ready until verified webhook events, idempotency, subscription lifecycle handling, reconciliation, and authorization are implemented.
-- CUDA-Q is optional. The existing qpp target is a CPU simulator; it is not NVIDIA GPU execution or a demonstrated quantum advantage.
-- The default checkout host references an old Render hostname. Production must set `APP_BASE_URL` explicitly.
+## Verified AWS staging topology
 
-## Target AWS architecture
+- Region: `us-east-2`.
+- ECS Fargate cluster: `sudogemini-staging`.
+- ECS service: `sudogemini-api`, desired/running count 1.
+- Container port: 8000; health check: `/health`.
+- ECR repository: `sudogemini-api`; immutable tags and scan-on-push enabled.
+- Application Load Balancer: `sudogemini-public`; target group `sudogemini-api-tg`.
+- DynamoDB: `sudogemini-staging-datasets` and `sudogemini-staging-trades`, partitioned by `tenant_id` and sorted by `record_id`, on-demand billing.
+- Cognito User Pool: `us-east-2_yeNn9tWY7`; app client `5kl6i9mong804ft96sp5c4fdm1`.
+- The task definition is configured with the Cognito pool/client IDs and the two DynamoDB table names.
+- The application container was healthy at last inspection.
 
-Use a staged architecture; do not create every service before the application boundaries and data model are stable.
+The existing API Gateway/Lambda data-exchange service is a separate, narrower service. It is not the FastAPI application served by ECS and must not be mistaken for the complete app.
 
-1. **Edge and identity**
-   - Route 53 + ACM for DNS and TLS.
-   - CloudFront and AWS WAF for public edge protection where appropriate.
-   - Amazon Cognito for customer identity, MFA, and token issuance.
-   - API Gateway or an ALB in front of the application.
-2. **Application**
-   - FastAPI on ECS Fargate for a continuously running API, or Lambda only if request patterns and package/runtime constraints fit.
-   - Separate worker service for long-running ingestion/enrichment jobs.
-   - Amazon SQS for durable job queues and dead-letter queues.
-3. **Data**
-   - Amazon S3 for raw, normalized, and curated data zones with versioning, encryption, lifecycle rules, and access logging.
-   - Amazon Aurora PostgreSQL for tenant, dataset, license, catalog, order, approval, and billing metadata.
-   - DynamoDB only for well-defined high-scale key/value workloads, not as a substitute for a relational transaction model.
-   - Glue Data Catalog and Athena for governed analytics when required.
-4. **AI**
-   - Amazon Bedrock Runtime Converse API for model calls.
-   - Use model IDs/inference profiles that are explicitly enabled for the account and region.
-   - Treat model output as untrusted. Validate all structured output before it can trigger tools or change records.
-   - Keep agent actions read-only by default. Require policy checks and human approval for publication, licensing decisions, data export, and financial actions.
-5. **Security and operations**
-   - IAM task roles with least privilege; no static AWS access keys in the app.
-   - KMS encryption for S3, databases, queues, and logs where supported.
-   - Secrets Manager for Stripe and other application secrets if permitted by account policy.
-   - CloudWatch metrics/logs/alarms, CloudTrail, backups, and tested restore procedures.
-   - Separate dev, staging, and production environments/accounts where feasible.
+## Current blockers to public access
+
+- The ALB listener on port 80 currently returns HTTP 503 with the message `TLS setup pending`.
+- No HTTPS listener has been installed yet.
+- A new ACM certificate has been requested for `sudogemini.com`, `www.sudogemini.com`, and `app.sudogemini.com`.
+- DNS validation CNAMEs have been written to the Route 53 hosted zone, but ACM still reports `PENDING_VALIDATION`. This usually means the public domain delegation does not yet point at this hosted zone, or public DNS has not propagated.
+- The hosted zone's assigned name servers are:
+  - `ns-931.awsdns-52.net`
+  - `ns-1963.awsdns-53.co.uk`
+  - `ns-491.awsdns-61.com`
+  - `ns-1094.awsdns-08.org`
+- The domain registrar's name-server settings must delegate the domain to these Route 53 name servers. The AWS account's Route 53 Domains API is unavailable under its current Free Tier restriction, so registrar delegation cannot be changed from this AWS session.
+- The Route 53 zone has no final apex, `www`, or `app` alias records yet. Do not add them until the certificate is issued and the HTTPS listener is working.
+
+## Required next deployment sequence
+
+1. Wait for ACM to issue the multi-domain certificate after public DNS delegation is correct.
+2. Create an HTTPS 443 ALB listener using the issued certificate and forwarding to `sudogemini-api-tg`.
+3. Change HTTP 80 to redirect to HTTPS 443.
+4. Add Route 53 alias records for `sudogemini.com`, `www.sudogemini.com`, and `app.sudogemini.com` to the ALB.
+5. Set `APP_BASE_URL=https://app.sudogemini.com` in the ECS task definition and redeploy.
+6. Verify browser sign-up, email confirmation, login, dashboard, tenant-scoped dataset registration, and sign-out.
+7. Configure MFA and account recovery, organization membership, and administrator-controlled tenant assignment before onboarding multiple users into shared enterprise tenants.
+8. Configure Secrets Manager and Stripe test-mode products/webhooks. Keep `STRIPE_LIVE_ENABLED=false` until subscription state, event idempotency, entitlement updates, refunds, and reconciliation are implemented and tested.
+9. Implement durable ingestion jobs and licensed source connectors. A dataset record is not evidence that data was ingested or licensed.
+10. Implement actual agent execution with Bedrock or another approved model provider, structured output validation, tool authorization, task queues, cost budgets, and human approval gates.
+11. Add monitoring alarms, backups/restore tests, rate limits, WAF rules, dependency/image scanning, and incident procedures.
+
+## Identity and tenancy
+
+The current API validates Cognito ID tokens and derives the tenant from the verified `custom:tenant_id` claim when one is present, otherwise from the signed `sub` claim. This gives each user an isolated workspace by default. Shared enterprise organizations require a server-controlled membership model and administrator-managed tenant assignment; never allow users to set their own tenant ID.
+
+## Data governance
+
+Only ingest data with documented rights and a lawful basis. Preserve source provenance, license terms, permitted purposes, retention rules, and deletion/opt-out obligations. Do not ingest or resell sensitive personal data without a documented legal basis and appropriate controls.
+
+Dataset submissions must remain `pending_review` until a human reviewer verifies source permissions and licensing evidence. Do not make license approval a caller-controlled field. Trade creation is disabled until approval, payment, delivery, and reconciliation are implemented.
 
 ## Six-agent orchestration contract
 
@@ -57,78 +78,30 @@ Use a staged architecture; do not create every service before the application bo
 | Marketplace | Prepare listings, quotes, and entitlement checks | Publish unapproved listings or release raw data |
 | Governance | Enforce policy, approvals, audit, retention, and deletion | Approve its own high-risk actions |
 
-Every agent task should carry: `tenant_id`, `actor_id`, `request_id`, `dataset_id` where applicable, source/license references, policy version, and an immutable audit event. The API—not the language model—must enforce authorization.
+Every agent task should carry `tenant_id`, `actor_id`, `request_id`, dataset/source/license references, policy version, and an audit event. The API—not the language model—must enforce authorization.
 
-## Required data model
+## Billing controls
 
-Minimum relational entities:
+Live billing is disabled. Keep it disabled until:
+- Stripe webhook signatures are verified against the raw body.
+- Event IDs are persisted and processed idempotently.
+- Subscription created/updated/deleted, invoice paid/failed, checkout completion, refunds, and disputes are handled as applicable.
+- Stripe state is reconciled with internal tenant entitlements.
+- Browser redirects never grant paid access by themselves.
+- Secrets are stored in AWS Secrets Manager, never Git.
 
-- `tenants`, `users`, `tenant_memberships`, `roles`
-- `data_sources`, `source_licenses`, `source_evidence`
-- `datasets`, `dataset_versions`, `dataset_fields`, `quality_reports`
-- `marketplace_listings`, `buyer_requirements`, `matches`
-- `approval_requests`, `approval_decisions`, `audit_events`
-- `orders`, `payments`, `subscriptions`, `webhook_events`
-- `data_entitlements`, `exports`, `deletion_requests`
+## AI and CUDA-Q controls
 
-Every tenant-owned row must be scoped by tenant ID and enforced in the database/application layer. Add automated cross-tenant access tests before enabling customer accounts.
+The six agents are currently role definitions. Model execution must be added behind a configurable provider interface, with validated structured output, prompt/version tracking, evaluations, safety controls, rate limits, and cost budgets. Keep tools read-only by default and require human approval for publication, licensing decisions, data export, and financial actions.
 
-## Release gates (in order)
+CUDA-Q is optional. The configured `qpp-cpu` target is a CPU simulator, not NVIDIA GPU acceleration and not evidence of quantum advantage. Cryptographic hashing and Merkle verification must continue to use established classical algorithms.
 
-### Gate 1 — API and application correctness
-- Add automated tests for every route, validation boundary, and error response.
-- Add structured logging with request IDs and redact credentials and sensitive payloads.
-- Set explicit CORS origins, trusted proxy behavior, request size limits, and rate limits.
-- Add readiness/liveness endpoints and graceful shutdown behavior.
+## Bedrock account test history
 
-### Gate 2 — Identity and tenant isolation
-- Integrate Cognito JWT validation.
-- Derive tenant identity from validated claims and membership records, never from an untrusted request body alone.
-- Add role-based authorization for ingestion, review, publication, export, billing, and administration.
-- Enforce tenant-scoped database access and test for IDOR/cross-tenant leaks.
-
-### Gate 3 — Durable data and provenance
-- Replace in-memory dictionaries with Aurora PostgreSQL transactions.
-- Store large data objects in S3; keep metadata and entitlements in PostgreSQL.
-- Implement source evidence, license terms, allowed purposes, retention, deletion, and opt-out workflows.
-- Implement real Merkle trees with canonical serialization, inclusion proofs, versioning, and signed/externally anchored roots if tamper evidence is required.
-
-### Gate 4 — Bedrock
-- Verify model use-case onboarding, account quotas, and inference permissions.
-- Use a configured inference profile via `BEDROCK_MODEL_ID`; do not hard-code a model ID.
-- Set explicit output token limits and adaptive retries.
-- Add prompt/version tracking, output schemas, evaluations, safety controls, and cost budgets.
-- Keep all agent tools behind deterministic server-side authorization.
-
-### Gate 5 — Billing
-- Keep live billing disabled until test-mode coverage passes.
-- Verify Stripe webhook signatures against the raw request body.
-- Persist event IDs and process events idempotently.
-- Handle subscription created/updated/deleted, invoice paid/failed, checkout completion, refunds, and disputes as applicable.
-- Reconcile Stripe state with internal entitlements; never grant access based only on a browser redirect.
-- Never allow the caller to self-assert approval or payment completion.
-
-### Gate 6 — Production deployment
-- Build immutable container images and scan dependencies/images.
-- Deploy to staging first; run migrations as a controlled release step.
-- Add alarms for error rate, latency, queue age, failed jobs, database saturation, and Bedrock throttling.
-- Test backup restoration, rollback, incident response, and data deletion.
-- Promote only after the acceptance checklist passes.
-
-## Bedrock account test result (2026-11-05)
-
-- AWS identity was successfully verified in account `821460119057`, region `us-east-2`.
-- The `us.anthropic.claude-sonnet-4-6` inference profile was present, but invocation returned a provider onboarding error: Anthropic use-case details have not been submitted for this account.
+- The `us.anthropic.claude-sonnet-4-6` inference profile was present, but invocation returned a provider onboarding error: Anthropic use-case details had not been submitted for this account.
 - A test invocation of `us.amazon.nova-lite-v1:0` returned a Bedrock throttling error indicating the account's daily token quota was exhausted.
-- Therefore, model availability in the profile list is not proof that inference is currently usable. Do not claim that Bedrock inference is live until an actual successful test call is recorded.
-
-## Brand and naming rules
-
-- Product/brand spelling: **Sudogemini**.
-- Platform name: **Sudogemini Nexus**.
-- Avoid introducing the misspelling `Sudogeminii` in customer-facing names.
-- Do not rename existing AWS resources blindly. Resource identifiers may be referenced by policies, deployments, or data; migrate them deliberately.
+- Model listing is not proof that inference is usable. Do not claim live Bedrock execution until a successful call is recorded.
 
 ## Definition of done
 
-A release is production-ready only when identity, tenant isolation, durable storage, source licensing/provenance, approvals, billing reconciliation, observability, recovery, and security tests all pass. A running health endpoint alone is not a production readiness signal.
+A release is production-ready only when identity, tenant isolation, durable storage, source licensing/provenance, approvals, billing reconciliation, agent execution controls, observability, recovery, and security tests all pass. A healthy container or a successful `/health` response alone is not a production readiness signal.
