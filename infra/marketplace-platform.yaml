@@ -48,7 +48,7 @@ Resources:
           - Id: ExpireStagedUploads
             Status: Enabled
             Prefix: incoming/
-            ExpirationInDays: !Ref DataRetentionDays
+            ExpirationInDays: !Ref StagingRetentionDays
             NoncurrentVersionExpiration:
               NoncurrentDays: 30
   JobsDeadLetterQueue:
@@ -92,15 +92,24 @@ Resources:
     Properties:
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
+        - AttributeName: listing_id
+          AttributeType: S
         - AttributeName: status
           AttributeType: S
         - AttributeName: created_at_listing_id
           AttributeType: S
       KeySchema:
-        - AttributeName: status
+        - AttributeName: listing_id
           KeyType: HASH
-        - AttributeName: created_at_listing_id
-          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: status-created-index
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: created_at_listing_id
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
       SSESpecification:
         SSEEnabled: true
       PointInTimeRecoverySpecification:
@@ -157,13 +166,13 @@ Resources:
         Statement:
           - Effect: Allow
             Action: [s3:PutObject]
-            Resource: !Sub "\${IngestionBucket.Arn}/incoming/*"
+            Resource: !Sub "${IngestionBucket.Arn}/incoming/*"
           - Effect: Allow
             Action: [s3:GetObject, s3:DeleteObject]
-            Resource: !Sub "\${IngestionBucket.Arn}/incoming/*"
+            Resource: !Sub "${IngestionBucket.Arn}/incoming/*"
           - Effect: Allow
-            Action: [s3:PutObject, s3:GetObject, s3:DeleteObject]
-            Resource: !Sub "\${IngestionBucket.Arn}/datasets/*"
+            Action: [s3:PutObject, s3:GetObject]
+            Resource: !Sub "${IngestionBucket.Arn}/datasets/*"
           - Effect: Allow
             Action: [sqs:SendMessage, sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes]
             Resource: !GetAtt PlatformJobsQueue.Arn
