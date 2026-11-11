@@ -13,6 +13,14 @@ class IngestionValidationTests(unittest.TestCase):
         self.assertEqual(result["columns"], ["company", "industry"])
         self.assertEqual(len(result["schema_sha256"]), 64)
 
+    def test_csv_rejects_duplicate_headers(self):
+        with self.assertRaisesRegex(ValueError, "unique"):
+            inspect_csv_or_json(b"company,Company\\nAcme,retail\\n", "text/csv")
+
+    def test_csv_rejects_rows_with_wrong_field_count(self):
+        with self.assertRaisesRegex(ValueError, "same number of fields"):
+            inspect_csv_or_json(b"company,industry\\nAcme\\n", "text/csv")
+
     def test_json_lines_record_count(self):
         data = b'{"company":"Acme","industry":"retail"}\n{"company":"Northwind","industry":"software"}\n'
         result = inspect_csv_or_json(data, "application/x-ndjson")
