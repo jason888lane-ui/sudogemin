@@ -18,8 +18,8 @@ def _now() -> str: return datetime.now(timezone.utc).isoformat()
 
 def enqueue_job(kind: str, payload: dict[str, Any]) -> str:
     queue_url = _required("PLATFORM_JOBS_QUEUE_URL")
-    job_id = str(uuid.uuid4())
-    message = {"job_id": job_id, "kind": kind, "created_at": _now(), **payload}
+    job_id = payload.get("job_id") or str(uuid.uuid4())
+    message = {"kind": kind, "created_at": _now(), **payload, "job_id": job_id}
     boto3.client("sqs", region_name=os.getenv("AWS_REGION", "us-east-2")).send_message(
         QueueUrl=queue_url, MessageBody=json.dumps(message, separators=(",", ":")))
     return job_id
