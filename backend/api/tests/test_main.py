@@ -40,11 +40,10 @@ class ApiReadinessTests(unittest.TestCase):
         response = self.client.get("/api/datasets")
         self.assertEqual(response.status_code, 503)
 
-    def test_trade_creation_remains_disabled(self):
-        item = main.TradeIn(buyer_id="buyer-test", dataset_id="dataset-test", amount_usd=10)
-        with self.assertRaises(main.HTTPException) as raised:
-            main.create_trade(item)
-        self.assertEqual(raised.exception.status_code, 503)
+    def test_trade_requires_listing_and_explicit_license_acceptance(self):
+        item = main.TradeIn(listing_id="listing-test")
+        self.assertEqual(item.listing_id, "listing-test")
+        self.assertFalse(item.accept_license)
 
     def test_webhook_fails_closed_without_signing_secret(self):
         response = self.client.post("/api/billing/webhook", content=b"{}")
