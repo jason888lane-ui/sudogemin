@@ -12,6 +12,7 @@ on:
     paths:
       - "backend/api/**"
       - ".github/workflows/api-ci.yml"
+      - "infra/marketplace-platform.yaml"
 
 permissions:
   contents: read
