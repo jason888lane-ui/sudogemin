@@ -105,3 +105,38 @@ The worker now uses the tenant/job key in the agent-jobs table as a durable job 
 The AWS account was inspected without making resource changes. The existing ECS API service is active with one running Fargate task, but it is still on task definition revision 3 and image tag `staging-10`. That task definition does not include `TENANT_MEMBERSHIPS_TABLE`, the marketplace/agent/SQS configuration, or Stripe test secrets. The supporting CloudFormation stack `sudogemini-marketplace-platform` does not exist; no `sudogemini` SQS queue or new marketplace/agent/membership tables are present. Therefore the latest PR code and its supporting infrastructure are not deployed to staging.
 
 Both existing CodeBuild projects use `NO_SOURCE` and an inline buildspec that clones the fixed `production-hardening` branch. They will not build this feature branch before it is merged to that branch. ECR tags are immutable and the existing image `staging-10` is not evidence of the current PR commit. Release sequencing must therefore be: approve and merge the reviewed PR; run CodeBuild against the updated base branch; verify the image commit/build provenance; deploy the supporting CloudFormation stack with the actual existing datasets/trades table ARNs and task role; update the API task definition with the stack outputs and approved Secrets Manager references; create a separate worker task definition/service using the same verified image and queue/table/bucket configuration; then run staging fault-injection and sandbox integration tests. Do not create these resources or change the ECS service without explicit release authorization and cost review.
+
+
+## CUDA-Q and autonomous operations boundary (2026-11-11)
+
+### CUDA-Q execution model
+
+- The API now delegates the experimental feature circuit to `quantum_engine.py`. The endpoint is tenant-authenticated, validates finite angle inputs in the range 0..pi, caps circuits at 16 features and shots at 5,000, and serializes access to CUDA-Q's process-global target.
+- CUDA-Q remains an optional dependency. The production API image does not install `requirements-cudaq.txt`; the runtime must report `package_missing` until a CUDA-Q-enabled compute image is built and deployed.
+- The default local target is `qpp-cpu`. GPU target `nvidia` requires an NVIDIA-capable Linux host and the explicit `CUDA_Q_GPU_ENABLED=true` opt-in. The current ECS API/worker services use Fargate, not an NVIDIA GPU host.
+- The API's local simulator endpoint is not a physical quantum computer and does not produce a validated commercial buyer/dataset match score. Its response deliberately returns `business_match_score: null`.
+- Physical QPU and managed GPU experiments should run as separately queued Amazon Braket Hybrid Jobs using the AWS-provided CUDA-Q container, not inside the latency-sensitive Fargate API. Braket supports CUDA-Q Hybrid Jobs and releases job compute after completion. Device region, instance type, run time, S3 output, and shot count must be bounded before submission.
+- Amazon Braket is not offered in `us-east-2`. Its documented regions include `us-east-1`, `us-west-1`, `us-west-2`, `eu-west-2`, and `eu-north-1`. The current AWS account was checked in `us-east-1`; `braket:SearchDevices` is blocked by an explicit AWS Organizations service control policy. An IAM role policy cannot override that explicit deny. The Organizations management-account administrator must review the SCP before Braket can be enabled. No Braket job, QPU task, GPU instance, or paid quantum workload was launched.
+
+### Autonomous AI operating model
+
+The six role prompts currently share one Bedrock worker implementation. They are role-specialized planners, not six independent autonomous agents with unrestricted tool access. The model response is persisted as a plan; it cannot itself change AWS resources, grant data rights, publish a listing, export customer data, send a payment, or execute a Stripe transfer.
+
+The intended automation boundary is:
+1. **Ingestion:** automatically process an upload only after the dataset rights record has been approved.
+2. **Quality:** automatically validate schema, provenance, completeness, freshness, and permitted-use metadata; quarantine failures.
+3. **Customer scoping:** automatically calculate candidate matches using authorized metadata and each tenant's own entitlements.
+4. **Marketplace:** automatically draft listings, pricing suggestions, and buyer quotes; publishing requires the configured rights/governance approval.
+5. **Sales:** automatically prepare follow-ups and checkout sessions; customer consent and payment provider confirmation remain mandatory.
+6. **Governance:** continuously evaluate policy, access, provenance, retention, and audit events; block or escalate uncertain cases.
+
+A future tool executor must use a server-side allow-list, tenant-scoped data access, idempotency keys, action-specific IAM permissions, budget ceilings, audit events, and a kill switch. Model-generated text is never an authorization token. No agent may self-approve rights, override tenant boundaries, or initiate unbounded paid compute. Routine low-risk work should be autonomous; high-impact or irreversible actions remain policy-gated.
+
+### Deployment gates
+
+- Run CI for the new CUDA-Q service and endpoint changes.
+- Build and deploy a dedicated CUDA-Q-capable runtime before setting `CUDA_Q_ENABLED=true`; do not add the CUDA-Q binary runtime to the existing API container by assumption.
+- Resolve the Braket Organizations SCP deny through the management account, then verify read-only device discovery and IAM permissions in a supported Braket region.
+- Add a Braket Hybrid Jobs queue and execution role with least-privilege `braket:CreateJob`, S3 artifact access, CloudWatch logs, and explicit job timeout/instance ceilings. Do not enable QPU submission until budget alerts and an owner-approved spending limit are configured.
+- Deploy and smoke-test the Bedrock/SQS worker and its supporting DynamoDB/S3 resources before increasing worker desired count. Confirm the model has access and tenant-scoped action contracts are implemented.
+- Exercise all six workflows with synthetic data, cross-tenant isolation tests, duplicate delivery, retries, approval gates, and kill-switch tests before customer data is used.
