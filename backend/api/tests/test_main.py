@@ -144,6 +144,60 @@ class ApiReadinessTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     main.tenant_id_from_claims(claims)
 
+
+    def test_tenant_membership_directory_maps_active_member(self):
+        table = MagicMock()
+        table.get_item.return_value = {"Item": {
+            "member_sub": "cognito-user-a", "tenant_id": "company-123", "status": "active"
+        }}
+        with patch.dict(os.environ, {"TENANT_MEMBERSHIPS_TABLE": "memberships"}), \
+             patch.object(main, "_tenant_memberships", table):
+            self.assertEqual(main.resolve_tenant_id("cognito-user-a"), "company-123")
+        table.get_item.assert_called_once_with(
+            Key={"member_sub": "cognito-user-a"}, ConsistentRead=True
+        )
+
+    def test_revoked_membership_falls_back_to_individual_tenant(self):
+        table = MagicMock()
+        table.get_item.return_value = {"Item": {
+            "member_sub": "cognito-user-a", "tenant_id": "company-123", "status": "revoked"
+        }}
+        with patch.dict(os.environ, {"TENANT_MEMBERSHIPS_TABLE": "memberships"}), \
+             patch.object(main, "_tenant_memberships", table):
+            self.assertEqual(main.resolve_tenant_id("cognito-user-a"), "cognito-user-a")
+
+    def test_unconfigured_membership_directory_keeps_individual_isolation(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(main.resolve_tenant_id("cognito-user-a"), "cognito-user-a")
+
+    def test_only_platform_admin_can_create_tenant_membership(self):
+        table = MagicMock()
+        request = type("Request", (), {"state": type("State", (), {"subject": "admin-sub"})()})()
+        item = main.TenantMembershipIn(member_sub="user-sub", tenant_id="company-123")
+        with patch.dict(os.environ, {"TENANT_MEMBERSHIPS_TABLE": "memberships"}), \
+             patch.object(main, "_tenant_memberships", table), \
+             patch.object(main, "require_platform_admin") as admin_check:
+            result = main.create_tenant_membership(item, request)
+        admin_check.assert_called_once_with(request)
+        self.assertEqual(result["status"], "active")
+        kwargs = table.put_item.call_args.kwargs
+        self.assertEqual(kwargs["Item"]["tenant_id"], "company-123")
+        self.assertEqual(kwargs["Item"]["created_by"], "admin-sub")
+        self.assertEqual(kwargs["ConditionExpression"], "attribute_not_exists(member_sub)")
+
+    def test_membership_revocation_is_conditional_and_admin_gated(self):
+        table = MagicMock()
+        request = type("Request", (), {"state": type("State", (), {"subject": "admin-sub"})()})()
+        with patch.dict(os.environ, {"TENANT_MEMBERSHIPS_TABLE": "memberships"}), \
+             patch.object(main, "_tenant_memberships", table), \
+             patch.object(main, "require_platform_admin") as admin_check:
+            result = main.revoke_tenant_membership("user-sub", request)
+        admin_check.assert_called_once_with(request)
+        self.assertEqual(result["status"], "revoked")
+        kwargs = table.update_item.call_args.kwargs
+        self.assertEqual(kwargs["Key"], {"member_sub": "user-sub"})
+        self.assertIn("#status=:active", kwargs["ConditionExpression"])
+
     def test_digest_is_deterministic(self):
         self.assertEqual(main.digest("sudogemini"), main.digest("sudogemini"))
         self.assertNotEqual(main.digest("sudogemini"), main.digest("different"))
