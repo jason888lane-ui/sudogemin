@@ -1,0 +1,14 @@
+{
+  "name": "sudogemini-web",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "build": "esbuild static/app.js --bundle --format=esm --target=es2022 --outfile=static/app.bundle.js"
+  },
+  "dependencies": {
+    "aws-amplify": "6.22.2"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12"
+  }
+}
