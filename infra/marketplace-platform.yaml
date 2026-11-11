@@ -49,6 +49,8 @@ Resources:
             Status: Enabled
             Prefix: incoming/
             ExpirationInDays: !Ref DataRetentionDays
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
   JobsDeadLetterQueue:
     Type: AWS::SQS::Queue
     Properties:
