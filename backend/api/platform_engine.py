@@ -38,6 +38,86 @@ def create_upload_url(*, tenant_id: str, dataset_id: str, filename: str, content
             "required_headers": {"Content-Type": content_type,
                                 "x-amz-server-side-encryption": "AES256"}}
 
+def _validate_schema(columns: list[str], row_count: int) -> dict:
+    if row_count < 1:
+        raise ValueError("The uploaded dataset contains no records")
+    normalized = {
+        re.sub(r"[^a-z0-9_]", "_", str(column).lower()) for column in columns
+    }
+    sensitive = sorted(normalized.intersection(_SENSITIVE_HEADERS))
+    if sensitive:
+        raise ValueError(
+            "Potentially sensitive personal-data columns require separate legal/security review: "
+            + ", ".join(sensitive)
+        )
+    return {
+        "record_count": row_count,
+        "columns": columns[:200],
+        "schema_sha256": hashlib.sha256(
+            json.dumps(columns, ensure_ascii=False, separators=(",", ":")).encode()
+        ).hexdigest(),
+    }
+
+
+def inspect_stream(fileobj, content_type: str) -> dict:
+    """Validate CSV/NDJSON incrementally; cap JSON arrays before parsing."""
+    fileobj.seek(0)
+    if content_type == "application/json":
+        raw = fileobj.read(10 * 1024 * 1024 + 1)
+        if len(raw) > 10 * 1024 * 1024:
+            raise ValueError("JSON object/array uploads are limited to 10 MiB; use NDJSON for larger files")
+        return inspect_csv_or_json(raw, content_type)
+
+    text = io.TextIOWrapper(fileobj, encoding="utf-8-sig", newline="")
+    try:
+        if content_type == "text/csv":
+            reader = csv.reader(text, strict=True)
+            columns = next(reader, [])
+            if not columns or any(not str(column).strip() for column in columns):
+                raise ValueError("CSV header row must contain non-empty column names")
+            normalized_headers = [str(column).strip().lower() for column in columns]
+            if len(set(normalized_headers)) != len(normalized_headers):
+                raise ValueError("CSV column names must be unique")
+            row_count = 0
+            for row in reader:
+                if not row:
+                    continue
+                if len(row) != len(columns):
+                    raise ValueError("CSV records must have the same number of fields as the header")
+                row_count += 1
+            return _validate_schema(columns, row_count)
+
+        if content_type == "application/x-ndjson":
+            columns = None
+            expected = None
+            row_count = 0
+            for line in text:
+                if not line.strip():
+                    continue
+                if len(line.encode("utf-8")) > 10 * 1024 * 1024:
+                    raise ValueError("An NDJSON record exceeds the 10 MiB per-record limit")
+                item = json.loads(line)
+                if not isinstance(item, dict):
+                    raise ValueError("Every NDJSON record must be an object")
+                if columns is None:
+                    columns = list(item.keys())
+                    expected = set(columns)
+                elif set(item.keys()) != expected:
+                    raise ValueError("NDJSON records must have a consistent schema")
+                row_count += 1
+            if columns is None:
+                raise ValueError("The uploaded file is empty")
+            return _validate_schema(columns, row_count)
+
+        raise ValueError("Unsupported ingestion content type")
+    finally:
+        # Detach so the caller retains ownership of the temporary file.
+        try:
+            text.detach()
+        except Exception:
+            pass
+
+
 _SENSITIVE_HEADERS = {"ssn","social_security_number","email","email_address","phone",
 "phone_number","mobile","date_of_birth","dob","passport","drivers_license",
 "driver_license","credit_card","card_number","bank_account","account_number",
@@ -98,10 +178,27 @@ def process_ingestion(message: dict) -> dict:
     s3 = boto3.client("s3", region_name=os.getenv("AWS_REGION", "us-east-2"))
     obj = s3.get_object(Bucket=bucket, Key=object_key)
     content_type = obj.get("ContentType", "application/octet-stream")
-    body = obj["Body"].read(100 * 1024 * 1024 + 1)
-    if len(body) > 100 * 1024 * 1024: raise ValueError("Upload exceeds the 100 MiB processing limit")
-    digest = hashlib.sha256(body).hexdigest()
-    result = inspect_csv_or_json(body, content_type)
+    # Spool to disk while hashing so CSV/NDJSON validation never retains the full
+    # object in application memory. The hard upload ceiling still protects disk use.
+    import tempfile
+    digest_state = hashlib.sha256()
+    total_bytes = 0
+    with tempfile.TemporaryFile(mode="w+b") as staged:
+        body_stream = obj["Body"]
+        while True:
+            chunk = body_stream.read(1024 * 1024)
+            if not chunk:
+                break
+            total_bytes += len(chunk)
+            if total_bytes > 100 * 1024 * 1024:
+                raise ValueError("Upload exceeds the 100 MiB processing limit")
+            digest_state.update(chunk)
+            staged.write(chunk)
+        if total_bytes == 0:
+            raise ValueError("The uploaded dataset is empty")
+        digest = digest_state.hexdigest()
+        staged.seek(0)
+        result = inspect_stream(staged, content_type)
     # Promote validated bytes out of the expiring staging prefix. The buyer download
     # path only ever references this immutable content-addressed key.
     filename = object_key.rsplit("/", 1)[-1]
