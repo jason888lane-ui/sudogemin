@@ -390,11 +390,13 @@ def create_trade(item: TradeIn,request: Request):
     trade_id=str(uuid.uuid4()); now=int(time.time())
     payload={"trade_id":trade_id,"buyer_tenant_id":buyer_tid,
         "seller_tenant_id":listing["seller_tenant_id"],"listing_id":item.listing_id,
-        "dataset_id":listing["dataset_id"],"amount_usd":float(listing["price_usd"])}
+        "dataset_id":listing["dataset_id"],"amount_usd":float(listing["price_usd"]),
+        "accepted_license_terms":listing["license_summary"],"license_accepted_at":now}
     proof=json.dumps(payload,sort_keys=True,separators=(",",":"))
     base={"id":trade_id,"buyer_id":buyer_tid,"dataset_id":listing["dataset_id"],
         "listing_id":item.listing_id,"amount_usd":float(listing["price_usd"]),
         "seller_tenant_id":listing["seller_tenant_id"],"buyer_tenant_id":buyer_tid,
+        "accepted_license_terms":listing["license_summary"],"license_accepted_at":now,
         "status":"pending_seller_approval","payment_status":"not_started",
         "merkle_root":merkle_root(proof),"created_at":now}
     seller_copy={**base,"record_id":"seller#"+trade_id,"role":"seller"}
@@ -441,9 +443,12 @@ def verify_trade(trade_id: str, request: Request):
     trade = response.get("Item")
     if not trade:
         raise HTTPException(status_code=404, detail="Trade not found")
-    payload = json.dumps({"trade_id": trade["id"], "buyer_id": trade["buyer_id"],
-                          "dataset_id": trade["dataset_id"], "amount_usd": trade["amount_usd"]},
-                         sort_keys=True, separators=(",", ":"))
+    payload = json.dumps({"trade_id":trade["id"],"buyer_tenant_id":trade["buyer_tenant_id"],
+        "seller_tenant_id":trade["seller_tenant_id"],"listing_id":trade["listing_id"],
+        "dataset_id":trade["dataset_id"],"amount_usd":trade["amount_usd"],
+        "accepted_license_terms":trade["accepted_license_terms"],
+        "license_accepted_at":trade["license_accepted_at"]},
+        sort_keys=True,separators=(",",":"))
     return {"trade_id": trade_id, "valid": merkle_root(payload) == trade["merkle_root"],
             "merkle_root": trade["merkle_root"]}
 
