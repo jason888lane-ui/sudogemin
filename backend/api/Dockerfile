@@ -19,6 +19,7 @@ COPY cudaq_smoke_test.py .
 RUN python cudaq_smoke_test.py
 
 COPY main.py personal_intelligence.py ./
+COPY static ./static
 
 RUN useradd --create-home --uid 10001 appuser \
     && chown -R appuser:appuser /app
