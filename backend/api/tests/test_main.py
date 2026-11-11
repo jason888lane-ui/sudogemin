@@ -92,6 +92,16 @@ class ApiReadinessTests(unittest.TestCase):
         self.assertEqual(encoded["record_id"], {"S": "order-1"})
         self.assertEqual(encoded["amount"], {"N": "12.34"})
 
+    def test_tenant_identity_ignores_untrusted_custom_tenant_claim(self):
+        claims = {"sub": "cognito-user-a", "custom:tenant_id": "attacker-selected-org"}
+        self.assertEqual(main.tenant_id_from_claims(claims), "cognito-user-a")
+
+    def test_tenant_identity_requires_verified_subject(self):
+        for claims in ({}, {"sub": ""}, {"sub": None}, {"sub": 123}):
+            with self.subTest(claims=claims):
+                with self.assertRaises(ValueError):
+                    main.tenant_id_from_claims(claims)
+
     def test_digest_is_deterministic(self):
         self.assertEqual(main.digest("sudogemini"), main.digest("sudogemini"))
         self.assertNotEqual(main.digest("sudogemini"), main.digest("different"))
