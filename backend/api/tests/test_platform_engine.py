@@ -51,23 +51,23 @@ class IngestionValidationTests(unittest.TestCase):
 
 
     def test_streaming_csv_counts_records_and_preserves_schema(self):
-        source = io.BytesIO(b"company,industry\\nAcme,retail\\nNorthwind,software\\n")
+        source = io.BytesIO(b"company,industry\nAcme,retail\nNorthwind,software\n")
         result = inspect_stream(source, "text/csv")
         self.assertEqual(result["record_count"], 2)
         self.assertEqual(result["columns"], ["company", "industry"])
 
     def test_streaming_ndjson_validates_each_record(self):
-        source = io.BytesIO(b'{"company":"Acme"}\\n{"company":"Northwind"}\\n')
+        source = io.BytesIO(b'{"company":"Acme"}\n{"company":"Northwind"}\n')
         result = inspect_stream(source, "application/x-ndjson")
         self.assertEqual(result["record_count"], 2)
 
     def test_streaming_ndjson_rejects_schema_drift(self):
-        source = io.BytesIO(b'{"company":"Acme"}\\n{"organization":"Northwind"}\\n')
+        source = io.BytesIO(b'{"company":"Acme"}\n{"organization":"Northwind"}\n')
         with self.assertRaisesRegex(ValueError, "consistent schema"):
             inspect_stream(source, "application/x-ndjson")
 
     def test_streaming_csv_rejects_sensitive_columns(self):
-        source = io.BytesIO(b"company,email\\nAcme,person@example.com\\n")
+        source = io.BytesIO(b"company,email\nAcme,person@example.com\n")
         with self.assertRaisesRegex(ValueError, "sensitive personal-data"):
             inspect_stream(source, "text/csv")
 
