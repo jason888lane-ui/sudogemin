@@ -10,9 +10,9 @@
 
 ## Current repository
 
-The current API is a development scaffold. It includes six workflow definitions, dataset and trade endpoints, a SHA-256 integrity digest, optional Stripe checkout routes, and an optional CUDA-Q experiment.
+The current staging API includes Cognito JWT authentication, tenant-scoped DynamoDB dataset/trade metadata, a static sign-up/sign-in dashboard, six governed workflow definitions, a SHA-256 integrity digest, optional Stripe checkout scaffolding, and an optional CUDA-Q CPU-simulator experiment.
 
-It is **not production-ready yet**. In particular, the current dataset and trade stores are process-local memory, API routes do not yet enforce user authentication or tenant isolation, and payment state requires a production-grade webhook and reconciliation lifecycle. Do not use it to store customer data or process live payments until those controls are implemented and tested.
+It is **not production-ready yet**. Dataset registration stores metadata only and forces submissions into pending review; it does not ingest source records. The six agents are workflow definitions, not independent autonomous model workers. Trade creation is disabled, Stripe live billing is disabled, and enterprise shared-tenant membership, MFA, recovery, subscription reconciliation, and production operations controls still need completion. Do not use it to process live payments or claim data is licensed/ingested until those controls are implemented and tested.
 
 ## Six workflow agents
 
@@ -37,6 +37,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
 Health check: `GET /health`  
+Dashboard: `/`  
 OpenAPI docs: `/docs`
 
 ## Configuration
