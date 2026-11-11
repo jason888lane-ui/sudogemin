@@ -163,6 +163,13 @@ def home():
         return FileResponse(index, media_type="text/html")
     return {"name": APP_NAME, "status": "operational", "version": app.version, "docs": "/docs"}
 
+@app.get("/platform.js")
+def platform_dashboard_script():
+    script = os.path.join(os.path.dirname(__file__), "static", "platform.js")
+    if not os.path.isfile(script):
+        raise HTTPException(status_code=404, detail="Dashboard module not found.")
+    return FileResponse(script, media_type="application/javascript")
+
 @app.get("/health")
 def health():
     return {"status": "ok", "service": APP_NAME, "timestamp": int(time.time())}
