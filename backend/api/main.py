@@ -8,6 +8,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
+from boto3.dynamodb.types import TypeSerializer
 import jwt
 from jwt import PyJWKClient
 from fastapi import FastAPI, HTTPException, Request
@@ -45,6 +46,11 @@ _marketplace = _dynamodb.Table(os.getenv("MARKETPLACE_TABLE", "sudogemini-stagin
 _agent_jobs = _dynamodb.Table(os.getenv("AGENT_JOBS_TABLE", "sudogemini-agent-jobs"))
 _subscriptions = _dynamodb.Table(os.getenv("SUBSCRIPTIONS_TABLE", "sudogemini-subscriptions"))
 _stripe_events = _dynamodb.Table(os.getenv("STRIPE_EVENTS_TABLE", "sudogemini-stripe-events"))
+_serializer = TypeSerializer()
+
+def _ddb_item(item: dict) -> dict:
+    return _serializer.serialize(item)["M"]
+
 
 app = FastAPI(title=APP_NAME, version="1.2.0", description="Tenant-authenticated B2B data brokerage API")
 
@@ -431,14 +437,14 @@ def create_trade(item: TradeIn,request: Request):
     seller_copy={**base,"record_id":"seller#"+trade_id,"role":"seller"}
     buyer_copy={**base,"record_id":trade_id,"role":"buyer"}
     try:
-        _trades.put_item(Item={**buyer_copy,"tenant_id":buyer_tid},
-            ConditionExpression="attribute_not_exists(record_id)")
-        _trades.put_item(Item={**seller_copy,"tenant_id":listing["seller_tenant_id"]},
-            ConditionExpression="attribute_not_exists(record_id)")
+        _dynamodb.meta.client.transact_write_items(TransactItems=[
+            {"Put":{"TableName":TRADES_TABLE,"Item":_ddb_item({**buyer_copy,"tenant_id":buyer_tid}),
+                    "ConditionExpression":"attribute_not_exists(record_id)"}},
+            {"Put":{"TableName":TRADES_TABLE,"Item":_ddb_item({**seller_copy,"tenant_id":listing["seller_tenant_id"]}),
+                    "ConditionExpression":"attribute_not_exists(record_id)"}}
+        ])
     except Exception as exc:
-        try: _trades.delete_item(Key={"tenant_id":buyer_tid,"record_id":trade_id})
-        except Exception: pass
-        raise HTTPException(status_code=503,detail="Could not persist marketplace order: "+type(exc).__name__)
+        raise HTTPException(status_code=503,detail="Could not persist marketplace order atomically: "+type(exc).__name__)
     return {"trade_id":trade_id,"status":"pending_seller_approval","amount_usd":base["amount_usd"]}
 
 @app.post("/api/trades/{trade_id}/seller-approve")
@@ -450,12 +456,23 @@ def seller_approve_trade(trade_id: str,request: Request):
     if trade.get("role")!="seller" or trade.get("status")!="pending_seller_approval":
         raise HTTPException(status_code=409,detail="Order is not awaiting seller approval.")
     buyer_tid=trade["buyer_tenant_id"]
-    _trades.update_item(Key={"tenant_id":buyer_tid,"record_id":trade_id},
-        UpdateExpression="SET #s=:approved",ExpressionAttributeNames={"#s":"status"},
-        ExpressionAttributeValues={":approved":"approved_pending_payment"})
-    _trades.update_item(Key=key,UpdateExpression="SET #s=:approved",
-        ExpressionAttributeNames={"#s":"status"},
-        ExpressionAttributeValues={":approved":"approved_pending_payment"})
+    try:
+        _dynamodb.meta.client.transact_write_items(TransactItems=[
+            {"Update":{"TableName":TRADES_TABLE,"Key":_ddb_item({"tenant_id":buyer_tid,"record_id":trade_id}),
+                "UpdateExpression":"SET #s=:approved",
+                "ConditionExpression":"#s=:pending",
+                "ExpressionAttributeNames":{"#s":{"S":"status"}},
+                "ExpressionAttributeValues":{":approved":{"S":"approved_pending_payment"},":pending":{"S":"pending_seller_approval"}}}},
+            {"Update":{"TableName":TRADES_TABLE,"Key":_ddb_item(key),
+                "UpdateExpression":"SET #s=:approved",
+                "ConditionExpression":"#s=:pending",
+                "ExpressionAttributeNames":{"#s":{"S":"status"}},
+                "ExpressionAttributeValues":{":approved":{"S":"approved_pending_payment"},":pending":{"S":"pending_seller_approval"}}}}
+        ])
+    except Exception as exc:
+        if type(exc).__name__ in {"TransactionCanceledException","ConditionalCheckFailedException"}:
+            raise HTTPException(status_code=409,detail="Order changed or was already approved; refresh the order list.")
+        raise HTTPException(status_code=503,detail="Order approval transaction failed: "+type(exc).__name__)
     return {"trade_id":trade_id,"status":"approved_pending_payment"}
 
 @app.get("/api/trades")
