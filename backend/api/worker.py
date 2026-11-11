@@ -36,6 +36,14 @@ def mark_terminal_failure(message: dict, error: Exception) -> None:
         save_job_result(message,{"error":type(error).__name__},status="failed")
 
 
+def decode_message(body: str) -> dict:
+    """Decode one queue message and reject non-object JSON payloads."""
+    message = json.loads(body)
+    if not isinstance(message, dict):
+        raise ValueError("SQS job body must be a JSON object")
+    return message
+
+
 def main() -> None:
     queue_url=os.environ["PLATFORM_JOBS_QUEUE_URL"]
     sqs=boto3.client("sqs",region_name=os.getenv("AWS_REGION","us-east-2"))
@@ -43,14 +51,17 @@ def main() -> None:
         response=sqs.receive_message(QueueUrl=queue_url,MaxNumberOfMessages=1,
             WaitTimeSeconds=20,VisibilityTimeout=3600,AttributeNames=["ApproximateReceiveCount"])
         for item in response.get("Messages",[]):
-            message=json.loads(item["Body"])
+            message = {}
             try:
+                # Decode inside the per-message exception boundary. A poison message
+                # must be retried/DLQ'd by SQS, not terminate the worker process.
+                message = decode_message(item["Body"])
                 handle(message)
                 sqs.delete_message(QueueUrl=queue_url,ReceiptHandle=item["ReceiptHandle"])
             except Exception as exc:
                 log.exception("Job failed; message retained for retry/DLQ")
                 receive_count=int(item.get("Attributes",{}).get("ApproximateReceiveCount","1"))
-                if receive_count>=4:
+                if receive_count>=4 and message:
                     try:
                         mark_terminal_failure(message,exc)
                     except Exception:
