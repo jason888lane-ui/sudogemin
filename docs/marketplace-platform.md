@@ -91,3 +91,8 @@ Run the worker as a separate ECS service using the same image and command `pytho
 - Confirm domain registration/delegation, ACM issuance, HTTPS listener, and public browser login before inviting customers.
 
 The order evidence field is a deterministic SHA-256 integrity commitment over one canonical order payload; it is not a multi-record Merkle tree or a Merkle inclusion proof. A successful CI run and healthy ECS task do not, by themselves, mean Sudogemini is ready to transact with customers.
+
+
+### Worker delivery and crash recovery hardening
+
+The worker now uses the tenant/job key in the agent-jobs table as a durable job ledger for both agent and ingestion messages. A conditional DynamoDB update grants a single worker a 55-minute lease, increments the attempt count, and fences completion writes by the lease-owner token. A duplicate delivery that finds a completed or actively leased job is acknowledged without executing the workload again. Failed attempts release their lease back to queued state so SQS redelivery can retry; if a worker exits unexpectedly, the lease expires before the queue's 60-minute visibility timeout, allowing a later delivery to recover the job. Agent results are committed only by the current lease owner. This reduces duplicate execution, but it is not exactly-once processing: ingestion promotion remains content-addressed/idempotent, and model inference can be repeated if a worker crashes after inference but before persisting its result. Production rollout still requires staging fault-injection tests and operational monitoring.
