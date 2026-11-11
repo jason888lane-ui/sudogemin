@@ -41,6 +41,8 @@ jobs:
           echo
           curl -fsS 'https://dns.google/resolve?name=app.sudogemini.com&type=CNAME' || true
           echo
+          curl -sS -i 'https://rdap.verisign.com/com/v1/domain/sudogemini.com' | head -c 5000 || true
+          echo
       - name: Compile application
         run: python -m compileall -q main.py personal_intelligence.py tests
       - name: Run API security and readiness tests
