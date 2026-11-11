@@ -78,6 +78,30 @@ class IngestionValidationTests(unittest.TestCase):
 
 
 
+    @patch.dict(os.environ, {"INGESTION_BUCKET": "bucket", "DATASETS_TABLE": "datasets"})
+    @patch("platform_engine.boto3.client")
+    @patch("platform_engine.boto3.resource")
+    def test_ingestion_retry_recovers_after_staging_object_was_deleted(self, resource, client):
+        table = MagicMock()
+        table.get_item.return_value = {"Item": {
+            "ingestion_status": "validated",
+            "ingestion_job_id": "job-123",
+            "object_sha256": "a" * 64,
+            "ingested_record_count": 17,
+            "schema_sha256": "b" * 64,
+        }}
+        resource.return_value.Table.return_value = table
+        from platform_engine import process_ingestion
+        result = process_ingestion({
+            "tenant_id": "tenant-a", "dataset_id": "dataset-a",
+            "object_key": "incoming/tenant-a/dataset-a/file.csv", "job_id": "job-123",
+        })
+        self.assertTrue(result["recovered"])
+        self.assertEqual(result["record_count"], 17)
+        client.assert_not_called()
+
+
+
 class JobDispatchTests(unittest.TestCase):
     @patch.dict(os.environ, {"PLATFORM_JOBS_QUEUE_URL": "https://sqs.example/queue"})
     @patch("platform_engine.boto3.client")
