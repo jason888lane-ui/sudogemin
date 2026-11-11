@@ -4,6 +4,7 @@ import os
 import time
 import uuid
 from typing import Any, Literal
+from decimal import Decimal, ROUND_HALF_UP
 
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
@@ -88,7 +89,7 @@ class TradeIn(BaseModel):
 
 class ListingIn(BaseModel):
     dataset_id: str = Field(min_length=1, max_length=100)
-    price_usd: float = Field(gt=0, le=1000000)
+    price_usd: Decimal = Field(gt=0, le=1000000)
     license_summary: str = Field(min_length=10, max_length=2000)
 
 class UploadUrlIn(BaseModel):
@@ -397,11 +398,11 @@ def create_trade(item: TradeIn,request: Request):
     trade_id=str(uuid.uuid4()); now=int(time.time())
     payload={"trade_id":trade_id,"buyer_tenant_id":buyer_tid,
         "seller_tenant_id":listing["seller_tenant_id"],"listing_id":item.listing_id,
-        "dataset_id":listing["dataset_id"],"amount_usd":float(listing["price_usd"]),
+        "dataset_id":listing["dataset_id"],"amount_usd":format(Decimal(str(listing["price_usd"])).quantize(Decimal("0.01")), ".2f"),
         "accepted_license_terms":listing["license_summary"],"license_accepted_at":now}
     proof=json.dumps(payload,sort_keys=True,separators=(",",":"))
     base={"id":trade_id,"buyer_id":buyer_tid,"dataset_id":listing["dataset_id"],
-        "listing_id":item.listing_id,"amount_usd":float(listing["price_usd"]),
+        "listing_id":item.listing_id,"amount_usd":Decimal(str(listing["price_usd"])).quantize(Decimal("0.01")),
         "seller_tenant_id":listing["seller_tenant_id"],"buyer_tenant_id":buyer_tid,
         "accepted_license_terms":listing["license_summary"],"license_accepted_at":now,
         "status":"pending_seller_approval","payment_status":"not_started",
@@ -452,7 +453,7 @@ def verify_trade(trade_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Trade not found")
     payload = json.dumps({"trade_id":trade["id"],"buyer_tenant_id":trade["buyer_tenant_id"],
         "seller_tenant_id":trade["seller_tenant_id"],"listing_id":trade["listing_id"],
-        "dataset_id":trade["dataset_id"],"amount_usd":trade["amount_usd"],
+        "dataset_id":trade["dataset_id"],"amount_usd":format(Decimal(str(trade["amount_usd"])).quantize(Decimal("0.01")), ".2f"),
         "accepted_license_terms":trade["accepted_license_terms"],
         "license_accepted_at":trade["license_accepted_at"]},
         sort_keys=True,separators=(",",":"))
@@ -554,7 +555,7 @@ def create_trade_checkout(trade_id: str, request: Request):
     connected_account = (seller or {}).get("stripe_account_id")
     if not connected_account or not (seller or {}).get("charges_enabled") or not (seller or {}).get("payouts_enabled"):
         raise HTTPException(status_code=409,detail="Seller must complete Stripe Connect onboarding and enable charges and payouts before checkout.")
-    amount_cents = int(round(float(trade["amount_usd"])*100))
+    amount_cents = int(Decimal(str(trade["amount_usd"]))*100)
     fee_raw = os.getenv("MARKETPLACE_FEE_PERCENT","").strip()
     if not fee_raw:
         raise HTTPException(status_code=503,detail="MARKETPLACE_FEE_PERCENT must be explicitly configured.")
