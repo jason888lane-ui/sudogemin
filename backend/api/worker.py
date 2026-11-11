@@ -98,6 +98,29 @@ def handle(message: dict, lease_owner: str) -> None:
         complete_job(message, lease_owner)
         return
     if kind == "agent":
+        table = _jobs_table()
+        control = table.get_item(
+            Key={"tenant_id": message["tenant_id"], "job_id": "__autonomy_control__"},
+            ConsistentRead=True,
+        ).get("Item") or {}
+        modes = control.get("modes", {})
+        mode = modes.get(message.get("agent_id"), "human_in_loop") if isinstance(modes, dict) else "human_in_loop"
+        globally_paused = os.getenv("AI_GLOBAL_PAUSE", "false").lower() == "true"
+        if globally_paused or control.get("paused") or mode != "autonomous":
+            next_status = "paused" if (globally_paused or control.get("paused")) else "awaiting_approval"
+            table.update_item(
+                Key={"tenant_id": message["tenant_id"], "job_id": message["job_id"]},
+                UpdateExpression="SET #s=:next, updated_at=:now REMOVE lease_owner, lease_expires_at",
+                ConditionExpression="lease_owner = :owner AND #s = :running",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={
+                    ":next": next_status, ":now": int(time.time()),
+                    ":owner": lease_owner, ":running": "running",
+                },
+            )
+            log.info("Agent job deferred by autonomy controls job_id=%s status=%s",
+                     message.get("job_id"), next_status)
+            return
         result = run_agent(message)
         save_job_result(message, result, status="completed", lease_owner=lease_owner)
         return
