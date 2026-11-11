@@ -4,6 +4,10 @@ Parameters:
   TaskRoleName:
     Type: String
     Description: Existing ECS task role name used by the Sudogemini API and worker.
+  AppOrigin:
+    Type: String
+    Default: https://app.sudogemini.com
+    Description: Exact HTTPS origin allowed to upload directly to the private S3 bucket.
   DataRetentionDays:
     Type: Number
     Default: 365
@@ -24,6 +28,13 @@ Resources:
         RestrictPublicBuckets: true
       VersioningConfiguration:
         Status: Enabled
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins: [!Ref AppOrigin]
+            AllowedMethods: [PUT]
+            AllowedHeaders: [Content-Type, x-amz-server-side-encryption]
+            ExposedHeaders: [ETag]
+            MaxAge: 300
       LifecycleConfiguration:
         Rules:
           - Id: ExpireStagedUploads
@@ -133,12 +144,13 @@ Resources:
             Action: [sqs:SendMessage, sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes]
             Resource: !GetAtt PlatformJobsQueue.Arn
           - Effect: Allow
-            Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:Query]
+            Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem, dynamodb:Query]
             Resource:
               - !GetAtt AgentJobsTable.Arn
               - !GetAtt MarketplaceTable.Arn
               - !GetAtt StripeEventsTable.Arn
               - !GetAtt SubscriptionsTable.Arn
+              - !Sub "${SubscriptionsTable.Arn}/index/*"
           - Effect: Allow
             Action: [bedrock:InvokeModel]
             Resource: "*"
