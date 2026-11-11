@@ -104,28 +104,44 @@ def handle(message: dict, lease_owner: str) -> None:
     raise ValueError("Unsupported job kind")
 
 
-def mark_terminal_failure(message: dict, error: Exception) -> None:
-    """Persist terminal failure state when SQS is about to move a job to its DLQ."""
-    kind = message.get("kind")
-    table_name = os.getenv("DATASETS_TABLE", "")
-    if kind == "ingestion" and table_name:
-        table = boto3.resource(
-            "dynamodb", region_name=os.getenv("AWS_REGION", "us-east-2")
-        ).Table(table_name)
-        table.update_item(
-            Key={"tenant_id": message["tenant_id"], "record_id": message["dataset_id"]},
-            UpdateExpression=(
-                "SET ingestion_status=:failed, ingestion_error_type=:error, "
-                "ingestion_failed_at=:at"
-            ),
-            ConditionExpression="ingestion_job_id = :job",
-            ExpressionAttributeValues={
-                ":failed": "failed", ":error": type(error).__name__,
-                ":at": int(time.time()), ":job": message.get("job_id", ""),
-            },
-        )
-    elif kind == "agent":
-        save_job_result(message, {"error": type(error).__name__}, status="failed")
+def mark_terminal_failure(
+    message: dict, error: Exception, lease_owner: str | None
+) -> None:
+    """Fence terminal failure state to the worker that owns the final attempt."""
+    if not lease_owner:
+        return
+    _jobs_table().update_item(
+        Key={"tenant_id": message["tenant_id"], "job_id": message["job_id"]},
+        UpdateExpression=(
+            "SET #status=:failed, last_error_type=:error, failed_at=:at "
+            "REMOVE lease_owner, lease_expires_at"
+        ),
+        ConditionExpression="lease_owner = :owner AND #status = :running",
+        ExpressionAttributeNames={"#status": "status"},
+        ExpressionAttributeValues={
+            ":failed": "failed", ":error": type(error).__name__,
+            ":at": int(time.time()), ":owner": lease_owner, ":running": "running",
+        },
+    )
+    if message.get("kind") == "ingestion":
+        table_name = os.getenv("DATASETS_TABLE", "")
+        if table_name:
+            table = boto3.resource(
+                "dynamodb", region_name=os.getenv("AWS_REGION", "us-east-2")
+            ).Table(table_name)
+            table.update_item(
+                Key={"tenant_id": message["tenant_id"], "record_id": message["dataset_id"]},
+                UpdateExpression=(
+                    "SET ingestion_status=:failed, ingestion_error_type=:error, "
+                    "ingestion_failed_at=:at"
+                ),
+                ConditionExpression="ingestion_job_id = :job AND ingestion_status <> :validated",
+                ExpressionAttributeValues={
+                    ":failed": "failed", ":error": type(error).__name__,
+                    ":at": int(time.time()), ":job": message["job_id"],
+                    ":validated": "validated",
+                },
+            )
 
 
 def decode_message(body: str) -> dict:
@@ -168,16 +184,16 @@ def main() -> None:
                 receive_count = int(
                     item.get("Attributes", {}).get("ApproximateReceiveCount", "1")
                 )
-                if owner and message:
+                if receive_count >= 4 and message:
+                    try:
+                        mark_terminal_failure(message, exc, owner)
+                    except Exception:
+                        log.exception("Could not persist terminal job failure")
+                elif owner and message:
                     try:
                         release_job(message, owner, exc)
                     except Exception:
                         log.exception("Could not release failed job lease")
-                if receive_count >= 4 and message:
-                    try:
-                        mark_terminal_failure(message, exc)
-                    except Exception:
-                        log.exception("Could not persist terminal job failure")
         time.sleep(1)
 
 
