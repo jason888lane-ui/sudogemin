@@ -61,9 +61,9 @@
 <footer class="foot">SUDOGEMINI NEXUS · AWS US EAST (OHIO) · CONTROLLED DATA OPERATIONS</footer>
 </div>
 <script type="module">
-import { Amplify } from "https://esm.sh/aws-amplify@6.15.0";
+import { Amplify } from "https://esm.sh/aws-amplify@6.15.0?bundle&target=es2022";
 import { initPlatform } from "./platform.js";
-import { signIn as cognitoSignIn, signUp as cognitoSignUp, confirmSignUp, signOut, getCurrentUser, fetchAuthSession } from "https://esm.sh/aws-amplify@6.15.0/auth";
+import { signIn as cognitoSignIn, signUp as cognitoSignUp, confirmSignUp, signOut, getCurrentUser, fetchAuthSession } from "https://esm.sh/aws-amplify@6.15.0/auth?bundle&target=es2022";
 
 Amplify.configure({Auth:{Cognito:{userPoolId:"us-east-2_yeNn9tWY7",userPoolClientId:"5kl6i9mong804ft96sp5c4fdm1",loginWith:{email:true}}}});
 const $=id=>document.getElementById(id);
