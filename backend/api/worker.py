@@ -214,6 +214,32 @@ def main() -> None:
                     QueueUrl=queue_url, ReceiptHandle=item["ReceiptHandle"]
                 )
             except Exception as exc:
+                error_code = (
+                    exc.response.get("Error", {}).get("Code", "")
+                    if isinstance(exc, ClientError) else ""
+                )
+                terminal_provider_errors = {
+                    "ThrottlingException", "ServiceQuotaExceededException",
+                    "AccessDeniedException", "ResourceNotFoundException",
+                    "ValidationException",
+                }
+                if error_code in terminal_provider_errors and message:
+                    # Model quota/access/configuration failures will not heal through
+                    # rapid SQS redelivery. Persist a visible terminal failure and
+                    # remove this delivery instead of burning retries or DLQ capacity.
+                    log.error("Terminal provider error for job_id=%s code=%s",
+                              message.get("job_id"), error_code)
+                    try:
+                        mark_terminal_failure(message, exc, owner)
+                    except Exception:
+                        log.exception("Could not persist terminal provider failure")
+                    try:
+                        sqs.delete_message(
+                            QueueUrl=queue_url, ReceiptHandle=item["ReceiptHandle"]
+                        )
+                    except Exception:
+                        log.exception("Could not delete terminal provider-error message")
+                    continue
                 log.exception("Job failed; message retained for retry/DLQ")
                 receive_count = int(
                     item.get("Attributes", {}).get("ApproximateReceiveCount", "1")
