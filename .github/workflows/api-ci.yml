@@ -6,11 +6,13 @@ on:
     paths:
       - "backend/api/**"
       - ".github/workflows/api-ci.yml"
+      - "infra/marketplace-platform.yaml"
   pull_request:
     branches: [production-hardening]
     paths:
       - "backend/api/**"
       - ".github/workflows/api-ci.yml"
+      - "infra/marketplace-platform.yaml"
 
 permissions:
   contents: read
@@ -44,6 +46,12 @@ jobs:
           curl -sS -i 'https://rdap.verisign.com/com/v1/domain/sudogemini.com' | head -c 5000 || true
           echo
       - name: Compile application
-        run: python -m compileall -q main.py personal_intelligence.py tests
+        run: python -m compileall -q main.py personal_intelligence.py platform_engine.py worker.py tests
+      - name: Check dashboard JavaScript syntax
+        run: node --input-type=module --check < static/platform.js
+      - name: Validate CloudFormation template
+        run: |
+          python -m pip install cfn-lint
+          cfn-lint ../../infra/marketplace-platform.yaml
       - name: Run API security and readiness tests
         run: python -m unittest discover -s tests -v
