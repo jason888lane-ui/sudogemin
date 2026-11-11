@@ -77,15 +77,28 @@ def process_ingestion(message: dict) -> dict:
     if len(body) > 100 * 1024 * 1024: raise ValueError("Upload exceeds the 100 MiB processing limit")
     digest = hashlib.sha256(body).hexdigest()
     result = inspect_csv_or_json(body, content_type)
+    # Promote validated bytes out of the expiring staging prefix. The buyer download
+    # path only ever references this immutable content-addressed key.
+    filename = object_key.rsplit("/", 1)[-1]
+    curated_key = f"datasets/{tenant_id}/{dataset_id}/{digest}/{filename}"
+    s3.copy_object(Bucket=bucket, Key=curated_key,
+        CopySource={"Bucket":bucket,"Key":object_key},
+        MetadataDirective="REPLACE", ContentType=content_type,
+        Metadata={"sha256":digest,"tenant_id":tenant_id,"dataset_id":dataset_id})
     table = boto3.resource("dynamodb", region_name=os.getenv("AWS_REGION", "us-east-2")).Table(table_name)
-    table.update_item(Key={"tenant_id": tenant_id, "record_id": dataset_id},
-        UpdateExpression=("SET ingestion_status=:done, object_key=:key, object_sha256=:digest, "
-        "ingested_record_count=:count, schema_sha256=:schema, ingested_at=:at, source_content_type=:ctype"),
-        ConditionExpression="license_status = :approved AND #status = :approved",
-        ExpressionAttributeNames={"#status":"status"},
-        ExpressionAttributeValues={":done":"validated",":key":object_key,":digest":digest,
-        ":count":result["record_count"],":schema":result["schema_sha256"],":at":_now(),
-        ":ctype":content_type,":approved":"approved"})
+    try:
+        table.update_item(Key={"tenant_id": tenant_id, "record_id": dataset_id},
+            UpdateExpression=("SET ingestion_status=:done, object_key=:key, object_sha256=:digest, "
+            "ingested_record_count=:count, schema_sha256=:schema, ingested_at=:at, source_content_type=:ctype"),
+            ConditionExpression="license_status = :approved AND #status = :approved",
+            ExpressionAttributeNames={"#status":"status"},
+            ExpressionAttributeValues={":done":"validated",":key":curated_key,":digest":digest,
+            ":count":result["record_count"],":schema":result["schema_sha256"],":at":_now(),
+            ":ctype":content_type,":approved":"approved"})
+    except Exception:
+        s3.delete_object(Bucket=bucket,Key=curated_key)
+        raise
+    s3.delete_object(Bucket=bucket,Key=object_key)
     return {"dataset_id":dataset_id,"sha256":digest,**result,"status":"validated"}
 
 def run_agent(message: dict) -> dict:
