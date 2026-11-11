@@ -44,6 +44,6 @@ jobs:
           curl -sS -i 'https://rdap.verisign.com/com/v1/domain/sudogemini.com' | head -c 5000 || true
           echo
       - name: Compile application
-        run: python -m compileall -q main.py personal_intelligence.py tests
+        run: python -m compileall -q main.py personal_intelligence.py platform_engine.py worker.py tests
       - name: Run API security and readiness tests
         run: python -m unittest discover -s tests -v
