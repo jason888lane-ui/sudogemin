@@ -57,7 +57,7 @@ export async function initPlatform({api,status,escapeHtml}) {
       try {
         const job=await api("/api/agents/jobs/"+encodeURIComponent(jobId));
         if(job.status==="completed") {
-          let summary="Agent completed. Human approval is still required.";
+          let summary="Agent completed. Analysis plan generated; no external action was executed.";
           try { const result=JSON.parse(job.result_json||"{}"); summary+=" "+(result.summary||""); }
           catch {}
           status("agentTaskStatus",summary,"good"); return;
