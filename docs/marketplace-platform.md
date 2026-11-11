@@ -37,7 +37,7 @@ The six roles are ingestion, quality, customer scoping, marketplace, sales, and 
 5. The API queues a job. The worker reads the object, calculates SHA-256, checks file structure and schema, counts records, and stores provenance metadata.
 6. Files with common sensitive-data columns such as email, phone, SSN, passport, or bank account fields are rejected for separate legal/security review.
 
-After validation, the worker promotes the object from the expiring `incoming/` prefix to an immutable content-addressed `datasets/` key and updates dataset metadata to that retained key. The initial worker has a 100 MiB processing limit and holds the complete file in memory during validation. This is an MVP constraint, not the final architecture for billion-record scale. Large-scale ingestion needs streaming/multipart processing, partitioned columnar storage, Glue/EMR or equivalent distributed processing, malware scanning, content inspection, retention enforcement, and a documented deletion workflow.
+After validation, the worker promotes the object from the expiring `incoming/` prefix to an immutable content-addressed `datasets/` key and updates dataset metadata to that retained key. The initial worker has a 100 MiB processing limit and holds the complete file in memory during validation. It receives one SQS job at a time with a one-hour visibility timeout and records terminal failure state when a job reaches its retry limit. This is an MVP constraint, not the final architecture for billion-record scale. Large-scale ingestion needs streaming/multipart processing, partitioned columnar storage, Glue/EMR or equivalent distributed processing, malware scanning, content inspection, retention enforcement, and a documented deletion workflow.
 
 The header-based sensitive-data check is only a guardrail; it is not a legal determination or a complete PII detector. Do not upload regulated or sensitive personal data until a dedicated review and control program is implemented.
 
@@ -83,4 +83,4 @@ Run the worker as a separate ECS service using the same image and command `pytho
 - Add order fulfillment/download audit events, customer deletion/export/retention workflows, security review, alarms, backups, restore tests, rate limiting, and WAF.
 - Confirm domain registration/delegation, ACM issuance, HTTPS listener, and public browser login before inviting customers.
 
-A successful CI run and healthy ECS task do not, by themselves, mean Sudogemini is ready to transact with customers.
+The order evidence field is a deterministic SHA-256 integrity commitment over one canonical order payload; it is not a multi-record Merkle tree or a Merkle inclusion proof. A successful CI run and healthy ECS task do not, by themselves, mean Sudogemini is ready to transact with customers.
