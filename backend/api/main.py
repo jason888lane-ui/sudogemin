@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from personal_intelligence import executive_guidance
 from platform_engine import create_upload_url, enqueue_job
+from quantum_engine import quantum_status as cudaq_status, sample_feature_circuit
 
 try:
     import stripe
@@ -646,12 +647,7 @@ def stripe_status():
             "idempotency_store":bool(os.getenv("STRIPE_EVENTS_TABLE"))}
 
 def quantum_status():
-    enabled = os.getenv("CUDA_Q_ENABLED", "false").lower() == "true"
-    ready = bool(cudaq and enabled)
-    return {"status": "ready" if ready else ("package_missing" if enabled and not cudaq else "disabled"),
-            "backend": os.getenv("CUDA_Q_TARGET", "qpp-cpu"),
-            "runtime": "CUDA-Q" if cudaq else "not_installed",
-            "note": "qpp is a CPU simulator; NVIDIA GPU execution requires a CUDA-capable host."}
+    return cudaq_status()
 
 def require_stripe():
     config=stripe_configuration()
@@ -911,27 +907,17 @@ def download_trade_dataset(trade_id: str, request: Request):
         raise HTTPException(status_code=503,detail="Dataset delivery is unavailable: "+type(exc).__name__)
 
 @app.post("/api/quantum/match")
-def quantum_match(item: QuantumMatchIn):
-    if len(item.buyer_weights) != len(item.dataset_weights):
-        raise HTTPException(status_code=422, detail="Buyer and dataset vectors must have equal length")
-    if not cudaq or os.getenv("CUDA_Q_ENABLED", "false").lower() != "true":
-        raise HTTPException(status_code=503, detail="CUDA-Q is not enabled; install the optional runtime and enable it.")
-    target = os.getenv("CUDA_Q_TARGET", "qpp")
+def quantum_match(item: QuantumMatchIn, request: Request):
+    # Keep compute requests tenant-authenticated; quantum samples are experimental
+    # and are never treated as marketplace approval or a commercial match score.
+    tenant(request)
     try:
-        cudaq.set_target(target)
-        @cudaq.kernel
-        def matching_kernel(buyer: list[float], dataset: list[float]):
-            q = cudaq.qvector(len(buyer))
-            for i in range(len(buyer)):
-                ry(buyer[i], q[i])
-                rz(dataset[i], q[i])
-            for i in range(len(buyer)-1):
-                x.ctrl(q[i], q[i+1])
-            mz(q)
-        counts = cudaq.sample(matching_kernel, item.buyer_weights, item.dataset_weights, shots_count=1000)
-        key = "0" * len(item.buyer_weights)
-        return {"engine":"CUDA-Q","target":target,"shots":1000,
-                "zero_state_probability":float(counts.get(key,0))/1000.0,
-                "note":"Measurement statistic, not a validated commercial relevance score."}
+        return sample_feature_circuit(
+            item.buyer_weights, item.dataset_weights, shots=1000
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=503, detail="CUDA-Q execution failed: "+type(exc).__name__)
