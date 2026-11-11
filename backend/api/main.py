@@ -341,7 +341,8 @@ def get_agent_job(job_id: str, request: Request):
 def marketplace_review_queue(request: Request):
     require_platform_admin(request)
     try:
-        rows=_marketplace.query(KeyConditionExpression=Key("status").eq("pending_review"),
+        rows=_marketplace.query(IndexName="status-created-index",
+            KeyConditionExpression=Key("status").eq("pending_review"),
             ScanIndexForward=False,Limit=100)
         return {"items":rows.get("Items",[]),"count":len(rows.get("Items",[]))}
     except Exception as exc:
@@ -350,7 +351,8 @@ def marketplace_review_queue(request: Request):
 @app.get("/api/marketplace/listings")
 def marketplace_listings():
     try:
-        result=_marketplace.query(KeyConditionExpression=Key("status").eq("approved"),
+        result=_marketplace.query(IndexName="status-created-index",
+            KeyConditionExpression=Key("status").eq("approved"),
             ScanIndexForward=False,Limit=100)
         return {"items":result.get("Items",[]),"count":len(result.get("Items",[]))}
     except Exception as exc:
@@ -376,12 +378,18 @@ def create_listing(item: ListingIn,request: Request):
 @app.post("/api/marketplace/listings/{listing_id}/approve")
 def approve_listing(listing_id: str,request: Request):
     require_platform_admin(request)
-    rows=_marketplace.query(KeyConditionExpression=Key("status").eq("pending_review"))
-    listing=next((x for x in rows.get("Items",[]) if x.get("listing_id")==listing_id),None)
-    if not listing: raise HTTPException(status_code=404,detail="Pending listing not found.")
-    _marketplace.delete_item(Key={"status":"pending_review","created_at_listing_id":listing["created_at_listing_id"]})
-    listing["status"]="approved"
-    _marketplace.put_item(Item=listing)
+    try:
+        _marketplace.update_item(
+            Key={"listing_id":listing_id},
+            UpdateExpression="SET #s=:approved, approved_at=:at, approved_by=:actor",
+            ConditionExpression="#s=:pending",
+            ExpressionAttributeNames={"#s":"status"},
+            ExpressionAttributeValues={":approved":"approved",":pending":"pending_review",
+                                       ":at":int(time.time()),":actor":request.state.subject})
+    except Exception as exc:
+        if type(exc).__name__ == "ConditionalCheckFailedException":
+            raise HTTPException(status_code=409,detail="Listing is no longer pending review.")
+        raise HTTPException(status_code=503,detail="Listing approval failed: "+type(exc).__name__)
     return {"listing_id":listing_id,"status":"approved"}
 
 @app.post("/api/trades",status_code=201)
@@ -390,9 +398,9 @@ def create_trade(item: TradeIn,request: Request):
     enforce_paid_entitlement(request)
     if not item.accept_license:
         raise HTTPException(status_code=422,detail="Explicit acceptance of the listing license terms is required.")
-    rows=_marketplace.query(KeyConditionExpression=Key("status").eq("approved"))
-    listing=next((x for x in rows.get("Items",[]) if x.get("listing_id")==item.listing_id),None)
-    if not listing: raise HTTPException(status_code=404,detail="Approved marketplace listing not found.")
+    listing=_marketplace.get_item(Key={"listing_id":item.listing_id}).get("Item")
+    if not listing or listing.get("status")!="approved":
+        raise HTTPException(status_code=404,detail="Approved marketplace listing not found.")
     if listing["seller_tenant_id"]==buyer_tid:
         raise HTTPException(status_code=409,detail="A seller cannot purchase its own listing.")
     trade_id=str(uuid.uuid4()); now=int(time.time())
