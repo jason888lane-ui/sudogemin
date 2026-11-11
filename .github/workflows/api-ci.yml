@@ -6,6 +6,7 @@ on:
     paths:
       - "backend/api/**"
       - ".github/workflows/api-ci.yml"
+      - "infra/marketplace-platform.yaml"
   pull_request:
     branches: [production-hardening]
     paths:
@@ -45,6 +46,8 @@ jobs:
           echo
       - name: Compile application
         run: python -m compileall -q main.py personal_intelligence.py platform_engine.py worker.py tests
+      - name: Check dashboard JavaScript syntax
+        run: node --input-type=module --check < static/platform.js
       - name: Validate CloudFormation template
         run: |
           python -m pip install cfn-lint
