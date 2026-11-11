@@ -101,6 +101,9 @@ class AgentRunIn(BaseModel):
 class SubscriptionCheckoutIn(BaseModel):
     customer_email: str = Field(min_length=5, max_length=254)
 
+class SellerOnboardingIn(BaseModel):
+    customer_email: str = Field(min_length=5, max_length=254)
+
 def digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -220,6 +223,14 @@ def match_buyer(item: MatchIn, request: Request):
         results.append({"dataset": safe_ds, "match_score": round(score, 4), "matched_terms": hits})
     return {"buyer_id": item.buyer_id, "matches": sorted(results, key=lambda x: x["match_score"], reverse=True)}
 
+def enforce_paid_entitlement(request: Request) -> None:
+    if os.getenv("REQUIRE_ACTIVE_SUBSCRIPTION", "false").lower() != "true":
+        return
+    tid = tenant(request)
+    subscription = _subscriptions.get_item(Key={"tenant_id":tid}).get("Item")
+    if not subscription or subscription.get("status") not in {"active","trialing"}:
+        raise HTTPException(status_code=402,detail="An active Sudogemini subscription is required for this operation.")
+
 def require_platform_admin(request: Request) -> None:
     subject = getattr(request.state, "subject", "")
     allowed = {x.strip() for x in os.getenv("PLATFORM_ADMIN_SUBS", "").split(",") if x.strip()}
@@ -250,6 +261,7 @@ def ingestion_upload_url(dataset_id: str, item: UploadUrlIn, request: Request):
         raise HTTPException(status_code=404, detail="Dataset not found.")
     if dataset.get("status") != "approved" or dataset.get("license_status") != "approved":
         raise HTTPException(status_code=409, detail="A platform administrator must approve documented data rights before upload.")
+    enforce_paid_entitlement(request)
     try:
         return create_upload_url(tenant_id=tid,dataset_id=dataset_id,
             filename=item.filename,content_type=item.content_type)
@@ -310,6 +322,7 @@ def marketplace_listings():
 @app.post("/api/marketplace/listings",status_code=202)
 def create_listing(item: ListingIn,request: Request):
     tid=tenant(request)
+    enforce_paid_entitlement(request)
     dataset=_datasets.get_item(Key={"tenant_id":tid,"record_id":item.dataset_id}).get("Item")
     if not dataset or dataset.get("status")!="approved" or dataset.get("license_status")!="approved":
         raise HTTPException(status_code=409,detail="Only approved, licensed datasets can be submitted for listing.")
@@ -337,6 +350,7 @@ def approve_listing(listing_id: str,request: Request):
 @app.post("/api/trades",status_code=201)
 def create_trade(item: TradeIn,request: Request):
     buyer_tid=tenant(request)
+    enforce_paid_entitlement(request)
     rows=_marketplace.query(KeyConditionExpression=Key("status").eq("approved"))
     listing=next((x for x in rows.get("Items",[]) if x.get("listing_id")==item.listing_id),None)
     if not listing: raise HTTPException(status_code=404,detail="Approved marketplace listing not found.")
@@ -458,6 +472,30 @@ def create_subscription_checkout(item: SubscriptionCheckoutIn, request: Request)
     except Exception as exc:
         raise HTTPException(status_code=502, detail="Stripe checkout failed: " + type(exc).__name__)
 
+@app.post("/api/marketplace/seller/onboarding")
+def create_seller_onboarding(item: SellerOnboardingIn, request: Request):
+    if os.getenv("STRIPE_CONNECT_ENABLED","false").lower() != "true":
+        raise HTTPException(status_code=503,detail="Stripe Connect onboarding is not enabled.")
+    sdk=require_live_stripe()
+    tid=tenant(request)
+    base=os.getenv("APP_BASE_URL","https://app.sudogemini.com").rstrip("/")
+    try:
+        existing=_subscriptions.get_item(Key={"tenant_id":tid}).get("Item") or {}
+        account_id=existing.get("stripe_account_id")
+        if not account_id:
+            account=sdk.Account.create(type="express",country="US",email=item.customer_email,
+                capabilities={"transfers":{"requested":True}})
+            account_id=account.id
+            _subscriptions.update_item(Key={"tenant_id":tid},
+                UpdateExpression="SET stripe_account_id=:a, seller_onboarding_status=:s",
+                ExpressionAttributeValues={":a":account_id,":s":"onboarding_started"})
+        link=sdk.AccountLink.create(account=account_id,
+            refresh_url=base+"/?connect=refresh",return_url=base+"/?connect=complete",
+            type="account_onboarding")
+        return {"onboarding_url":link.url,"expires_at":link.expires_at}
+    except Exception as exc:
+        raise HTTPException(status_code=502,detail="Stripe Connect onboarding failed: "+type(exc).__name__)
+
 @app.post("/api/trades/{trade_id}/checkout")
 def create_trade_checkout(trade_id: str, request: Request):
     sdk = require_live_stripe()
@@ -468,14 +506,27 @@ def create_trade_checkout(trade_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Trade not found")
     if trade.get("status") != "approved_pending_payment":
         raise HTTPException(status_code=409, detail="Trade is not approved for checkout")
+    seller_tid = trade.get("seller_tenant_id")
+    seller = _subscriptions.get_item(Key={"tenant_id":seller_tid}).get("Item") if seller_tid else None
+    connected_account = (seller or {}).get("stripe_account_id")
+    if not connected_account:
+        raise HTTPException(status_code=409,detail="Seller must complete Stripe Connect onboarding before checkout.")
+    amount_cents = int(round(float(trade["amount_usd"])*100))
+    fee_percent = float(os.getenv("MARKETPLACE_FEE_PERCENT","10"))
+    if fee_percent < 0 or fee_percent > 30:
+        raise HTTPException(status_code=503,detail="Marketplace fee configuration is invalid.")
+    application_fee = int(round(amount_cents*fee_percent/100))
     base = os.getenv("APP_BASE_URL", "http://localhost:8000").rstrip("/")
     try:
         session = sdk.checkout.Session.create(mode="payment",
-            line_items=[{"price_data":{"currency":"usd","unit_amount":int(round(float(trade["amount_usd"])*100)),
+            line_items=[{"price_data":{"currency":"usd","unit_amount":amount_cents,
             "product_data":{"name":"Sudogemini dataset purchase "+trade["dataset_id"]}},"quantity":1}],
+            payment_intent_data={"application_fee_amount":application_fee,
+                "transfer_data":{"destination":connected_account}},
             success_url=base+"/?trade="+trade_id+"&payment=success",
             cancel_url=base+"/?trade="+trade_id+"&payment=cancelled",
-            metadata={"trade_id":trade_id,"tenant_id":tid,"merkle_root":trade["merkle_root"]})
+            metadata={"trade_id":trade_id,"tenant_id":tid,"seller_tenant_id":seller_tid,
+                "merkle_root":trade["merkle_root"]})
         _trades.update_item(Key={"tenant_id":tid,"record_id":trade_id},
             UpdateExpression="SET stripe_session_id=:sid, payment_status=:status",
             ExpressionAttributeValues={":sid":session.id,":status":"checkout_created"})
@@ -506,8 +557,10 @@ async def stripe_webhook(request: Request):
     except Exception:
         # Duplicate deliveries are acknowledged only when the event record already exists.
         existing = _stripe_events.get_item(Key={"event_id":event_id}).get("Item")
-        if existing:
+        if existing and existing.get("status") == "processed":
             return {"received":True,"duplicate":True,"event_type":event_type}
+        if existing:
+            raise HTTPException(status_code=503,detail="Stripe event is already being processed; retry shortly.")
         raise HTTPException(status_code=503,detail="Stripe event idempotency store is unavailable.")
     try:
         metadata = obj.get("metadata") or {}
@@ -539,14 +592,28 @@ async def stripe_webhook(request: Request):
                     "price_ids":[x.get("price",{}).get("id","") for x in obj.get("items",{}).get("data",[])],
                     "current_period_end":obj.get("current_period_end",0),"cancel_at_period_end":bool(obj.get("cancel_at_period_end")),
                     "updated_at":int(time.time())})
+        elif event_type in ("charge.refunded","charge.dispute.created"):
+            payment_intent=obj.get("payment_intent")
+            if payment_intent:
+                # Mark matching orders for manual review; never auto-release disputed or refunded data.
+                candidates=_trades.scan(FilterExpression="stripe_payment_intent = :pi",
+                    ExpressionAttributeValues={":pi":payment_intent}).get("Items",[])
+                for trade in candidates:
+                    _trades.update_item(Key={"tenant_id":trade["tenant_id"],"record_id":trade["record_id"]},
+                        UpdateExpression="SET #s=:s, payment_status=:p",
+                        ExpressionAttributeNames={"#s":"status"},
+                        ExpressionAttributeValues={":s":"refund_review" if event_type=="charge.refunded" else "dispute_review",
+                            ":p":"refunded" if event_type=="charge.refunded" else "disputed"})
         elif event_type in ("invoice.payment_failed","invoice.payment_succeeded"):
             subscription_id = obj.get("subscription")
             if subscription_id:
-                # Reconciliation worker can resolve tenant by subscription_id; never grant access from invoice payload alone.
-                _subscriptions.update_item(Key={"tenant_id":metadata.get("tenant_id","unresolved")},
-                    UpdateExpression="SET last_invoice_status=:s, last_invoice_id=:i, updated_at=:t",
-                    ExpressionAttributeValues={":s":"failed" if event_type.endswith("failed") else "paid",
-                        ":i":obj.get("id",""),":t":int(time.time())})
+                matched = _subscriptions.query(IndexName="subscription-id-index",
+                    KeyConditionExpression=Key("subscription_id").eq(subscription_id)).get("Items",[])
+                for subscription in matched:
+                    _subscriptions.update_item(Key={"tenant_id":subscription["tenant_id"]},
+                        UpdateExpression="SET last_invoice_status=:s, last_invoice_id=:i, updated_at=:t",
+                        ExpressionAttributeValues={":s":"failed" if event_type.endswith("failed") else "paid",
+                            ":i":obj.get("id",""),":t":int(time.time())})
         _stripe_events.update_item(Key={"event_id":event_id},
             UpdateExpression="SET #s=:done, processed_at=:at",
             ExpressionAttributeNames={"#s":"status"},
