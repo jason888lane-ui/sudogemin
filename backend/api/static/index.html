@@ -105,14 +105,13 @@ $("sellerOnboarding").onclick=async()=>{try{const result=await api("/api/marketp
 $("marketCatalog").addEventListener("click",async e=>{const id=e.target?.dataset?.buy;if(!id)return;try{const result=await api("/api/trades",{method:"POST",body:JSON.stringify({listing_id:id,accept_license:true})});status("sellerStatus","Order "+result.trade_id+" created; awaiting seller approval.","good");await refreshMarketplace()}catch(err){status("sellerStatus",err.message,"error")}});
 $("orders").addEventListener("click",async e=>{const target=e.target?.dataset||{};try{if(target.approve){await api("/api/trades/"+encodeURIComponent(target.approve)+"/seller-approve",{method:"POST"});await refreshMarketplace()}if(target.checkout){const result=await api("/api/trades/"+encodeURIComponent(target.checkout)+"/checkout",{method:"POST"});window.location.href=result.checkout_url}if(target.download){const result=await api("/api/trades/"+encodeURIComponent(target.download)+"/download");window.location.href=result.download_url}}catch(err){status("sellerStatus",err.message,"error")}});
 $("refreshMarket").onclick=refreshMarketplace;
-$("refreshReviewQueue")?.addEventListener("click",refreshReviewQueue);
 
 $("createDataset").onclick=async()=>{const b=$("createDataset");b.disabled=true;try{const item={name:$("datasetName").value.trim(),description:$("datasetDescription").value,category:$("datasetCategory").value.trim()||"general",source:$("datasetSource").value.trim()||"user-submitted",license_evidence_url:$("licenseEvidenceUrl").value.trim(),permitted_use:$("permittedUse").value.trim(),record_count:Number($("recordCount").value||0)};const created=await api("/api/datasets",{method:"POST",body:JSON.stringify(item)});status("datasetStatus","Submitted. Status: pending review.","good");$("datasetName").value="";await refresh()}catch(e){status("datasetStatus",e.message,"error")}finally{b.disabled=false}};
 $("connection").textContent="AWS API · "+location.host;
 try{await getCurrentUser();await signedIn();await refreshReviewQueue();await refreshMarketplace()}catch{showAuth("signin")}
 </script>
 </body></html>+Number(x.price_usd||0).toFixed(2)+' · '+escapeHtml(x.license_summary||"")+'</small><button class="btn" data-approve-listing="'+escapeHtml(x.listing_id)+'">Approve marketplace listing</button></div>').join("");
-  $("reviewQueue").innerHTML=(ds||ls)?'<h3>Dataset rights</h3>'+(ds||"No pending datasets.")+'<h3>Marketplace listings</h3>'+(ls||"No pending listings."):"No pending reviews.";
+  $("reviewQueue").innerHTML='<h3>Dataset rights</h3>'+(ds||"No pending datasets.")+'<h3>Marketplace listings</h3>'+(ls||"No pending listings.");
  }catch(e){$("reviewQueue").textContent="Administrator review access unavailable: "+e.message}
 }
 $("reviewQueue").addEventListener("click",async e=>{
