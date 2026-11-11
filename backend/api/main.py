@@ -311,6 +311,16 @@ def get_agent_job(job_id: str, request: Request):
     job.pop("tenant_id",None)
     return job
 
+@app.get("/api/marketplace/review-queue")
+def marketplace_review_queue(request: Request):
+    require_platform_admin(request)
+    try:
+        rows=_marketplace.query(KeyConditionExpression=Key("status").eq("pending_review"),
+            ScanIndexForward=False,Limit=100)
+        return {"items":rows.get("Items",[]),"count":len(rows.get("Items",[]))}
+    except Exception as exc:
+        raise HTTPException(status_code=503,detail="Marketplace review queue is unavailable: "+type(exc).__name__)
+
 @app.get("/api/marketplace/listings")
 def marketplace_listings():
     try:
