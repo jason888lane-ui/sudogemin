@@ -66,6 +66,48 @@ class ApiReadinessTests(unittest.TestCase):
         response = self.client.post("/api/billing/webhook", content=b"{}")
         self.assertEqual(response.status_code, 503)
 
+    def test_subscription_checkout_uses_tenant_scoped_idempotency_key(self):
+        from types import SimpleNamespace
+        sdk = MagicMock()
+        sdk.checkout.Session.create.return_value = SimpleNamespace(
+            url="https://checkout.stripe.test/session", id="cs_test_123"
+        )
+        request = SimpleNamespace(state=SimpleNamespace(tenant_id="tenant-a"))
+        with patch("main.require_stripe", return_value=sdk), \
+             patch("main.stripe_configuration", return_value={"price": "price_test"}), \
+             patch.dict(os.environ, {"APP_BASE_URL": "https://app.sudogemini.com"}):
+            result = main.create_subscription_checkout(
+                main.SubscriptionCheckoutIn(customer_email="billing@example.com"), request
+            )
+        self.assertEqual(result["session_id"], "cs_test_123")
+        self.assertEqual(
+            sdk.checkout.Session.create.call_args.kwargs["idempotency_key"],
+            "sudogemini-subscription-tenant-a",
+        )
+
+    def test_connect_account_creation_uses_tenant_scoped_idempotency_key(self):
+        from types import SimpleNamespace
+        sdk = MagicMock()
+        sdk.Account.create.return_value = SimpleNamespace(id="acct_test_123")
+        sdk.AccountLink.create.return_value = SimpleNamespace(
+            url="https://connect.stripe.test/onboard", expires_at=1234567890
+        )
+        main._subscriptions.get_item.return_value = {"Item": {}}
+        request = SimpleNamespace(state=SimpleNamespace(tenant_id="tenant-b"))
+        with patch("main.require_stripe", return_value=sdk), \
+             patch.dict(os.environ, {
+                 "STRIPE_CONNECT_ENABLED": "true",
+                 "APP_BASE_URL": "https://app.sudogemini.com",
+             }):
+            result = main.create_seller_onboarding(
+                main.SellerOnboardingIn(customer_email="seller@example.com"), request
+            )
+        self.assertIn("onboarding_url", result)
+        self.assertEqual(
+            sdk.Account.create.call_args.kwargs["idempotency_key"],
+            "sudogemini-connect-tenant-b",
+        )
+
     def test_stripe_test_mode_never_accepts_live_secret_key(self):
         with patch.dict(os.environ, {
             "STRIPE_MODE": "test", "STRIPE_TEST_ENABLED": "true",
