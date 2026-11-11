@@ -45,7 +45,7 @@ The header-based sensitive-data check is only a guardrail; it is not a legal det
 
 - Subscription checkout requires `STRIPE_LIVE_ENABLED=true`, a live secret key, a configured price ID, and a public HTTPS return URL. Keep the switch false until the owner approves the Stripe account and the test suite has passed.
 - Stripe Connect onboarding is disabled unless `STRIPE_CONNECT_ENABLED=true`. It creates Express connected accounts and onboarding links only when the authenticated seller calls the endpoint.
-- Checkout uses a destination charge and a configurable `MARKETPLACE_FEE_PERCENT` (0–30, default 10) only after Stripe reports that seller charges and payouts are enabled.
+- Checkout uses a destination charge and an explicitly configured `MARKETPLACE_FEE_PERCENT` (0–30; no default fee is assumed) only after Stripe reports that seller charges and payouts are enabled.
 - Signed webhook events are recorded by event ID before processing. Subscription changes, invoice status, Connect account readiness, paid orders, refunds, and disputes are handled.
 - Paid entitlements can be enforced with `REQUIRE_ACTIVE_SUBSCRIPTION=true`. Leave false until pricing, trial policy, grace periods, cancellation, tax, refund, and access-revocation policy are approved.
 - A browser redirect is never treated as payment proof. Fulfillment checks the persisted webhook-updated payment state and returns a five-minute signed download URL.
@@ -67,7 +67,7 @@ Configure these environment values from CloudFormation outputs:
 - `PLATFORM_ADMIN_SUBS` — comma-separated Cognito subject IDs for platform administrators
 - `BEDROCK_MODEL_ID` — inference profile/model that has actually passed a Converse smoke test
 - `APP_BASE_URL` — verified HTTPS URL
-- `STRIPE_LIVE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID` — store in Secrets Manager and inject securely
+- `STRIPE_LIVE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`, `MARKETPLACE_FEE_PERCENT` — store secrets in Secrets Manager and inject securely; explicitly set the fee policy
 - `STRIPE_LIVE_ENABLED=false`, `STRIPE_CONNECT_ENABLED=false`, `REQUIRE_ACTIVE_SUBSCRIPTION=false` until approved
 
 Run the worker as a separate ECS service using the same image and command `python worker.py`. The API image includes the worker module, but this PR does not create a new Fargate worker service or change the existing ECS service.
