@@ -44,8 +44,8 @@
 <div class="layout">
 <div>
 <section class="card"><h2>Six-agent workflow system</h2><div class="agentlist" id="agents"><div class="muted">Loading workflow definitions…</div></div><p class="muted" style="font-size:11px;line-height:1.5;margin-bottom:0">These are governed workflow roles. Model execution, ingestion and external actions remain disabled until configured and approved.</p></section>
-<section class="card" style="margin-top:14px"><h2>Register a dataset</h2><div class="field"><label>Dataset name</label><input id="datasetName" maxlength="120"></div><div class="formrow"><div class="field"><label>Category</label><input id="datasetCategory" value="general" maxlength="80"></div><div class="field"><label>Declared record count</label><input id="recordCount" type="number" min="0" value="0"></div></div><div class="field"><label>Description</label><textarea id="datasetDescription" maxlength="2000"></textarea></div><div class="field"><label>Source reference</label><input id="datasetSource" value="user-submitted" maxlength="200"></div><button class="btn primary" id="createDataset">Submit for review</button><div class="status" id="datasetStatus"></div></section>
-<section class="card" style="margin-top:14px"><div class="sectionhead"><h2>Dataset catalog</h2><span class="pill">Tenant scoped</span></div><div id="datasets" class="muted">Loading datasets…</div></section>
+<section class="card" style="margin-top:14px"><h2>Register a dataset</h2><div class="field"><label>Dataset name</label><input id="datasetName" maxlength="120"></div><div class="formrow"><div class="field"><label>Category</label><input id="datasetCategory" value="general" maxlength="80"></div><div class="field"><label>Declared record count</label><input id="recordCount" type="number" min="0" value="0"></div></div><div class="field"><label>Description</label><textarea id="datasetDescription" maxlength="2000"></textarea></div><div class="field"><label>Source reference</label><input id="datasetSource" value="user-submitted" maxlength="200"></div><div class="field"><label>License evidence URL</label><input id="licenseEvidenceUrl" type="url" placeholder="https://source.example/license"></div><div class="field"><label>Permitted use and restrictions</label><textarea id="permittedUse" maxlength="1000" placeholder="Describe rights, allowed purposes, retention and restrictions"></textarea></div><button class="btn primary" id="createDataset">Submit for review</button><div class="status" id="datasetStatus"></div></section>
+<section class="card" style="margin-top:14px"><div class="sectionhead"><h2>Dataset catalog</h2><span class="pill">Tenant scoped</span></div><div id="datasets" class="muted">Loading datasets…</div></section><section class="card" style="margin-top:14px"><h2>Administrator review queue</h2><div id="reviewQueue" class="muted">Administrator access required.</div></section>
 </div>
 <div>
 <section class="card"><h2>Service integrations</h2><div id="integrations" class="muted">Checking integrations…</div></section>
@@ -86,6 +86,44 @@ async function refresh(){status("apiStatus","Refreshing workspace…");try{const
 function renderDatasets(items){$("datasets").innerHTML=items.length?items.map(d=>'<div class="dataset"><b>'+escapeHtml(d.name)+'</b> <span class="badge">'+escapeHtml(d.license_status||d.status||"pending_review")+'</span><small>'+escapeHtml(d.category||"general")+' · '+Number(d.record_count||0).toLocaleString()+' declared records</small><small>'+escapeHtml(d.description||"No description")+'</small></div>').join(""):'No datasets submitted yet.'}
 $("refresh").onclick=refresh;
 
+
+async function refreshReviewQueue(){
+ try{
+  const [datasets,listings]=await Promise.all([api("/api/datasets/review-queue"),api("/api/marketplace/review-queue")]);
+  const ds=datasets.items.map(x=>'<div class="dataset"><b>'+escapeHtml(x.name||x.record_id)+'</b><small>'+escapeHtml(x.license_evidence_url||"No evidence URL")+'</small><small>'+escapeHtml(x.permitted_use||"No permitted-use statement")+'</small><button class="btn" data-approve-dataset="'+escapeHtml(x.record_id)+'">Approve dataset rights</button></div>').join("");
+  const ls=listings.items.map(x=>'<div class="dataset"><b>'+escapeHtml(x.title||x.listing_id)+'</b><small>
+  try{
+    const [catalog,orders]=await Promise.all([api("/api/marketplace/listings"),api("/api/trades")]);
+    $("marketCatalog").innerHTML=catalog.items.length?catalog.items.map(x=>'<div class="dataset"><b>'+escapeHtml(x.title)+'</b><small>'+escapeHtml(x.category)+' · $'+Number(x.price_usd).toFixed(2)+'</small><small>'+escapeHtml(x.license_summary)+'</small><button class="btn" data-buy="'+escapeHtml(x.listing_id)+'">Accept license & request purchase</button></div>').join(""):"No approved listings yet.";
+    $("orders").innerHTML=orders.items.length?orders.items.map(x=>'<div class="dataset"><b>Order '+escapeHtml(x.id)+'</b><small>'+escapeHtml(x.role||"buyer")+' · '+escapeHtml(x.status)+' · $'+Number(x.amount_usd||0).toFixed(2)+'</small>'+((x.role==="seller"&&x.status==="pending_seller_approval")?'<button class="btn" data-approve="'+escapeHtml(x.id)+'">Approve order</button>':"")+((x.role!=="seller"&&x.status==="approved_pending_payment")?'<button class="btn" data-checkout="'+escapeHtml(x.id)+'">Pay securely</button>':"")+((x.role!=="seller"&&x.status==="paid_pending_fulfillment")?'<button class="btn" data-download="'+escapeHtml(x.id)+'">Download dataset</button>':"")+'</div>').join(""):"No orders yet.";
+  }catch(e){$("marketCatalog").textContent=e.message;$("orders").textContent="Orders unavailable: "+e.message}
+}
+$("runAgent").onclick=async()=>{try{const result=await api("/api/agents/run",{method:"POST",body:JSON.stringify({agent_id:$("agentRole").value,task:$("agentTask").value.trim()})});status("agentTaskStatus","Queued job "+result.job_id+". Refresh after the worker processes it.","good")}catch(e){status("agentTaskStatus",e.message,"error")}};
+$("uploadDataset").onclick=async()=>{const file=$("datasetFile").files[0],id=$("uploadDatasetId").value.trim();if(!file||!id){status("uploadStatus","Select a file and enter an approved dataset ID.","error");return}try{const type=file.type||({csv:"text/csv",json:"application/json",jsonl:"application/x-ndjson",ndjson:"application/x-ndjson"}[file.name.split(".").pop().toLowerCase()]||"");const grant=await api("/api/ingestion/"+encodeURIComponent(id)+"/upload-url",{method:"POST",body:JSON.stringify({filename:file.name,content_type:type})});const uploaded=await fetch(grant.upload_url,{method:"PUT",headers:grant.required_headers,body:file});if(!uploaded.ok)throw Error("S3 upload failed ("+uploaded.status+")");const done=await api("/api/ingestion/"+encodeURIComponent(id)+"/complete?object_key="+encodeURIComponent(grant.object_key),{method:"POST"});status("uploadStatus","Upload complete. Validation job "+done.job_id+" queued.","good")}catch(e){status("uploadStatus",e.message,"error")}};
+$("submitListing").onclick=async()=>{try{const result=await api("/api/marketplace/listings",{method:"POST",body:JSON.stringify({dataset_id:$("listingDatasetId").value.trim(),price_usd:Number($("listingPrice").value),license_summary:$("listingLicense").value.trim()})});status("listingStatus","Listing submitted for review: "+result.listing_id,"good")}catch(e){status("listingStatus",e.message,"error")}};
+$("sellerOnboarding").onclick=async()=>{try{const result=await api("/api/marketplace/seller/onboarding",{method:"POST",body:JSON.stringify({customer_email:$("sellerEmail").value.trim()})});window.location.href=result.onboarding_url}catch(e){status("sellerStatus",e.message,"error")}};
+$("marketCatalog").addEventListener("click",async e=>{const id=e.target?.dataset?.buy;if(!id)return;try{const result=await api("/api/trades",{method:"POST",body:JSON.stringify({listing_id:id,accept_license:true})});status("sellerStatus","Order "+result.trade_id+" created; awaiting seller approval.","good");await refreshMarketplace()}catch(err){status("sellerStatus",err.message,"error")}});
+$("orders").addEventListener("click",async e=>{const target=e.target?.dataset||{};try{if(target.approve){await api("/api/trades/"+encodeURIComponent(target.approve)+"/seller-approve",{method:"POST"});await refreshMarketplace()}if(target.checkout){const result=await api("/api/trades/"+encodeURIComponent(target.checkout)+"/checkout",{method:"POST"});window.location.href=result.checkout_url}if(target.download){const result=await api("/api/trades/"+encodeURIComponent(target.download)+"/download");window.location.href=result.download_url}}catch(err){status("sellerStatus",err.message,"error")}});
+$("refreshMarket").onclick=refreshMarketplace;
+$("refreshReviewQueue")?.addEventListener("click",refreshReviewQueue);
+
+$("createDataset").onclick=async()=>{const b=$("createDataset");b.disabled=true;try{const item={name:$("datasetName").value.trim(),description:$("datasetDescription").value,category:$("datasetCategory").value.trim()||"general",source:$("datasetSource").value.trim()||"user-submitted",license_evidence_url:$("licenseEvidenceUrl").value.trim(),permitted_use:$("permittedUse").value.trim(),record_count:Number($("recordCount").value||0)};const created=await api("/api/datasets",{method:"POST",body:JSON.stringify(item)});status("datasetStatus","Submitted. Status: pending review.","good");$("datasetName").value="";await refresh()}catch(e){status("datasetStatus",e.message,"error")}finally{b.disabled=false}};
+$("connection").textContent="AWS API · "+location.host;
+try{await getCurrentUser();await signedIn();await refreshReviewQueue();await refreshMarketplace()}catch{showAuth("signin")}
+</script>
+</body></html>+Number(x.price_usd||0).toFixed(2)+' · '+escapeHtml(x.license_summary||"")+'</small><button class="btn" data-approve-listing="'+escapeHtml(x.listing_id)+'">Approve marketplace listing</button></div>').join("");
+  $("reviewQueue").innerHTML=(ds||ls)?'<h3>Dataset rights</h3>'+(ds||"No pending datasets.")+'<h3>Marketplace listings</h3>'+(ls||"No pending listings."):"No pending reviews.";
+ }catch(e){$("reviewQueue").textContent="Administrator review access unavailable: "+e.message}
+}
+$("reviewQueue").addEventListener("click",async e=>{
+ const d=e.target?.dataset||{};
+ try{
+  if(d.approveDataset)await api("/api/datasets/"+encodeURIComponent(d.approveDataset)+"/approve",{method:"POST"});
+  if(d.approveListing)await api("/api/marketplace/listings/"+encodeURIComponent(d.approveListing)+"/approve",{method:"POST"});
+  await refreshReviewQueue();await refresh();
+ }catch(err){$("reviewQueue").textContent=err.message}
+});
+
 async function refreshMarketplace(){
   try{
     const [catalog,orders]=await Promise.all([api("/api/marketplace/listings"),api("/api/trades")]);
@@ -101,7 +139,7 @@ $("marketCatalog").addEventListener("click",async e=>{const id=e.target?.dataset
 $("orders").addEventListener("click",async e=>{const target=e.target?.dataset||{};try{if(target.approve){await api("/api/trades/"+encodeURIComponent(target.approve)+"/seller-approve",{method:"POST"});await refreshMarketplace()}if(target.checkout){const result=await api("/api/trades/"+encodeURIComponent(target.checkout)+"/checkout",{method:"POST"});window.location.href=result.checkout_url}if(target.download){const result=await api("/api/trades/"+encodeURIComponent(target.download)+"/download");window.location.href=result.download_url}}catch(err){status("sellerStatus",err.message,"error")}});
 $("refreshMarket").onclick=refreshMarketplace;
 
-$("createDataset").onclick=async()=>{const b=$("createDataset");b.disabled=true;try{const item={name:$("datasetName").value.trim(),description:$("datasetDescription").value,category:$("datasetCategory").value.trim()||"general",source:$("datasetSource").value.trim()||"user-submitted",record_count:Number($("recordCount").value||0)};const created=await api("/api/datasets",{method:"POST",body:JSON.stringify(item)});status("datasetStatus","Submitted. Status: pending review.","good");$("datasetName").value="";await refresh()}catch(e){status("datasetStatus",e.message,"error")}finally{b.disabled=false}};
+$("createDataset").onclick=async()=>{const b=$("createDataset");b.disabled=true;try{const item={name:$("datasetName").value.trim(),description:$("datasetDescription").value,category:$("datasetCategory").value.trim()||"general",source:$("datasetSource").value.trim()||"user-submitted",license_evidence_url:$("licenseEvidenceUrl").value.trim(),permitted_use:$("permittedUse").value.trim(),record_count:Number($("recordCount").value||0)};const created=await api("/api/datasets",{method:"POST",body:JSON.stringify(item)});status("datasetStatus","Submitted. Status: pending review.","good");$("datasetName").value="";await refresh()}catch(e){status("datasetStatus",e.message,"error")}finally{b.disabled=false}};
 $("connection").textContent="AWS API · "+location.host;
 try{await getCurrentUser();await signedIn()}catch{showAuth("signin")}
 </script>
