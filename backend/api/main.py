@@ -312,7 +312,51 @@ def update_agent_controls(item: AgentControlUpdateIn, request: Request):
         "updated_by": getattr(request.state, "subject", ""),
     }
     _agent_jobs.put_item(Item=record)
-    return {"controls": _read_autonomy_controls(tid)}
+    resumed = []
+    if current["paused"] and not paused:
+        query_args = {
+            "KeyConditionExpression": Key("tenant_id").eq(tid),
+            "FilterExpression": Attr("status").eq("paused"),
+            "Limit": 100,
+        }
+        while True:
+            page = _agent_jobs.query(**query_args)
+            for job in page.get("Items", []):
+                agent_id = job.get("agent_id")
+                mode = current["modes"].get(agent_id, "human_in_loop")
+                next_status = "queued" if mode == "autonomous" else "awaiting_approval"
+                try:
+                    _agent_jobs.update_item(
+                        Key={"tenant_id": tid, "job_id": job["job_id"]},
+                        UpdateExpression="SET #s=:next, resumed_at=:at",
+                        ConditionExpression="#s=:paused",
+                        ExpressionAttributeNames={"#s": "status"},
+                        ExpressionAttributeValues={
+                            ":next": next_status, ":paused": "paused", ":at": int(time.time())
+                        },
+                    )
+                    if next_status == "queued":
+                        enqueue_job("agent", {
+                            "tenant_id": tid, "agent_id": agent_id,
+                            "task": job["task"], "job_id": job["job_id"],
+                        })
+                    resumed.append({"job_id": job["job_id"], "status": next_status})
+                except Exception:
+                    # Do not leave a job marked queued if it was not delivered.
+                    try:
+                        _agent_jobs.update_item(
+                            Key={"tenant_id": tid, "job_id": job["job_id"]},
+                            UpdateExpression="SET #s=:paused",
+                            ConditionExpression="#s=:queued",
+                            ExpressionAttributeNames={"#s": "status"},
+                            ExpressionAttributeValues={":paused": "paused", ":queued": "queued"},
+                        )
+                    except Exception:
+                        pass
+            if not page.get("LastEvaluatedKey"):
+                break
+            query_args["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+    return {"controls": _read_autonomy_controls(tid), "resumed_jobs": resumed}
 
 
 @app.get("/api/agents/approvals")
