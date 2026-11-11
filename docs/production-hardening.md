@@ -25,7 +25,7 @@ The dashboard and API are a staging MVP, not a fully operational enterprise data
 - DynamoDB: `sudogemini-staging-datasets` and `sudogemini-staging-trades`, partitioned by `tenant_id` and sorted by `record_id`, on-demand billing.
 - Cognito User Pool: `us-east-2_yeNn9tWY7`; app client `5kl6i9mong804ft96sp5c4fdm1`.
 - The task definition is configured with the Cognito pool/client IDs and the two DynamoDB table names.
-- The application container was healthy at last inspection.
+- The application container was healthy at last inspection. On 2026-11-11, CodeBuild build 10 produced ECR image `staging-10` (about 93 MB) and ECS task definition revision 3 was deployed. The new Fargate task reached `RUNNING` and `HEALTHY`; the ALB target group reported it healthy. The container serves the static dashboard at `/` and passed CI tests.
 
 The existing API Gateway/Lambda data-exchange service is a separate, narrower service. It is not the FastAPI application served by ECS and must not be mistaken for the complete app.
 
