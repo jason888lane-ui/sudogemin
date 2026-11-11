@@ -185,15 +185,18 @@ def process_ingestion(message: dict) -> dict:
     total_bytes = 0
     with tempfile.TemporaryFile(mode="w+b") as staged:
         body_stream = obj["Body"]
-        while True:
-            chunk = body_stream.read(1024 * 1024)
-            if not chunk:
-                break
-            total_bytes += len(chunk)
-            if total_bytes > 100 * 1024 * 1024:
-                raise ValueError("Upload exceeds the 100 MiB processing limit")
-            digest_state.update(chunk)
-            staged.write(chunk)
+        try:
+            while True:
+                chunk = body_stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                total_bytes += len(chunk)
+                if total_bytes > 100 * 1024 * 1024:
+                    raise ValueError("Upload exceeds the 100 MiB processing limit")
+                digest_state.update(chunk)
+                staged.write(chunk)
+        finally:
+            body_stream.close()
         if total_bytes == 0:
             raise ValueError("The uploaded dataset is empty")
         digest = digest_state.hexdigest()
