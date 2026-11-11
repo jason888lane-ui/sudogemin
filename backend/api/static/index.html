@@ -43,7 +43,7 @@
 </div>
 <div class="layout">
 <div>
-<section class="card"><h2>Six-agent workflow system</h2><div class="agentlist" id="agents"><div class="muted">Loading workflow definitions…</div></div><p class="muted" style="font-size:11px;line-height:1.5;margin-bottom:0">These are governed workflow roles. Model execution, ingestion and external actions remain disabled until configured and approved.</p></section>
+<section class="card"><h2>Six-agent workflow system</h2><div class="agentlist" id="agents"><div class="muted">Loading workflow definitions…</div></div><p class="muted" style="font-size:11px;line-height:1.5;margin-bottom:0">These six roles currently generate Bedrock-backed plans and recommendations. Autonomous mode runs the analysis automatically; it does not yet perform external business actions.</p></section>
 <section class="card" style="margin-top:14px"><h2>Register a dataset</h2><div class="field"><label>Dataset name</label><input id="datasetName" maxlength="120"></div><div class="formrow"><div class="field"><label>Category</label><input id="datasetCategory" value="general" maxlength="80"></div><div class="field"><label>Declared record count</label><input id="recordCount" type="number" min="0" value="0"></div></div><div class="field"><label>Description</label><textarea id="datasetDescription" maxlength="2000"></textarea></div><div class="field"><label>Source reference</label><input id="datasetSource" value="user-submitted" maxlength="200"></div><div class="field"><label>License evidence URL</label><input id="licenseEvidenceUrl" type="url"></div><div class="field"><label>Permitted use and restrictions</label><textarea id="permittedUse" maxlength="1000"></textarea></div><button class="btn primary" id="createDataset">Submit for review</button><div class="status" id="datasetStatus"></div></section>
 <section class="card" style="margin-top:14px"><div class="sectionhead"><h2>Dataset catalog</h2><span class="pill">Tenant scoped</span></div><div id="datasets" class="muted">Loading datasets…</div></section>
 </div>
@@ -53,8 +53,8 @@
 </div>
 </div>
 <section class="card" style="margin-top:14px" id="autonomyPanel">
-<div class="sectionhead"><div><h2>Autonomy Control Center</h2><p class="muted" style="font-size:11px;margin:4px 0">Choose which agents can execute routine approved workflows automatically.</p></div><label style="display:flex;align-items:center;gap:8px;font-size:12px"><input id="aiGlobalPause" type="checkbox" style="width:auto"> Pause all AI agents</label></div>
-<div class="notice" style="margin:12px 0">Autonomous mode runs low-risk workflows without routine approval. Human-in-the-loop mode holds each job for approval. Data-rights decisions, sensitive-data exports, publishing, contracts, payments, and destructive infrastructure actions remain protected by separate authorization checks.</div>
+<div class="sectionhead"><div><h2>Autonomy Control Center</h2><p class="muted" style="font-size:11px;margin:4px 0">Choose which agents may run AI analysis automatically or wait for human approval.</p></div><label style="display:flex;align-items:center;gap:8px;font-size:12px"><input id="aiGlobalPause" type="checkbox" style="width:auto"> Pause all AI agents</label></div>
+<div class="notice" style="margin:12px 0">AI autonomous mode dispatches Bedrock analysis tasks without routine approval. Human-in-the-loop mode holds each task for approval. The current agents generate plans and recommendations; external actions are not yet executed by model-generated instructions. Data rights, exports, publishing, contracts, payments, and infrastructure changes remain separately authorized.</div>
 <div id="autonomyAgentControls" class="agentlist"><div class="muted">Loading autonomy settings…</div></div>
 <div style="display:flex;gap:10px;align-items:center;margin-top:14px;flex-wrap:wrap"><button class="btn primary" id="saveAutonomy">Save autonomy settings</button><span id="autonomyStatus" class="status"></span></div>
 </section>
