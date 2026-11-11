@@ -123,6 +123,11 @@ class AgentRunIn(BaseModel):
     agent_id: Literal["ingestion", "quality", "scoping", "marketplace", "sales", "governance"]
     task: str = Field(min_length=1, max_length=6000)
 
+class AgentControlUpdateIn(BaseModel):
+    paused: bool | None = None
+    modes: dict[str, Literal["autonomous", "human_in_loop"]] | None = None
+
+
 class SubscriptionCheckoutIn(BaseModel):
     customer_email: str = Field(min_length=5, max_length=254)
 
@@ -244,10 +249,101 @@ def platform_dashboard_script():
 def health():
     return {"status": "ok", "service": APP_NAME, "timestamp": int(time.time())}
 
+_AUTONOMY_CONTROL_ID = "__autonomy_control__"
+_ALLOWED_AGENT_IDS = {agent["id"] for agent in AGENTS}
+_DEFAULT_AGENT_MODES = {agent_id: "human_in_loop" for agent_id in _ALLOWED_AGENT_IDS}
+
+
+def _read_autonomy_controls(tid: str) -> dict:
+    item = _agent_jobs.get_item(
+        Key={"tenant_id": tid, "job_id": _AUTONOMY_CONTROL_ID},
+        ConsistentRead=True,
+    ).get("Item") or {}
+    modes = dict(_DEFAULT_AGENT_MODES)
+    stored = item.get("modes", {})
+    if isinstance(stored, dict):
+        for agent_id, mode in stored.items():
+            if agent_id in _ALLOWED_AGENT_IDS and mode in {"autonomous", "human_in_loop"}:
+                modes[agent_id] = mode
+    global_pause = os.getenv("AI_GLOBAL_PAUSE", "false").lower() == "true"
+    return {
+        "paused": bool(item.get("paused", False)) or global_pause,
+        "global_pause": global_pause,
+        "modes": modes,
+        "updated_at": item.get("updated_at"),
+        "updated_by": item.get("updated_by"),
+    }
+
+
 @app.get("/api/agents")
-def agents():
-    return {"agents": AGENTS, "count": len(AGENTS), "mode": "workflow-scaffold",
-            "note": "Agents expose defined responsibilities; connect model providers to enable LLM execution."}
+def agents(request: Request):
+    controls = _read_autonomy_controls(tenant(request))
+    return {
+        "agents": [{**agent, "mode": controls["modes"][agent["id"]],
+                    "paused": controls["paused"]} for agent in AGENTS],
+        "count": len(AGENTS),
+        "mode": "tenant_configurable_governed_autonomy",
+        "controls": controls,
+        "note": "Autonomous mode executes queued low-risk agent jobs; human-in-the-loop mode waits for tenant approval. External high-impact actions remain policy-gated.",
+    }
+
+
+@app.get("/api/agents/controls")
+def get_agent_controls(request: Request):
+    return {"controls": _read_autonomy_controls(tenant(request)), "agents": AGENTS}
+
+
+@app.put("/api/agents/controls")
+def update_agent_controls(item: AgentControlUpdateIn, request: Request):
+    tid = tenant(request)
+    current = _read_autonomy_controls(tid)
+    if item.modes:
+        unknown = set(item.modes) - _ALLOWED_AGENT_IDS
+        if unknown:
+            raise HTTPException(status_code=422, detail="Unknown agent IDs: " + ", ".join(sorted(unknown)))
+        current["modes"].update(item.modes)
+    paused = current["paused"] if item.paused is None else item.paused
+    if current["global_pause"]:
+        paused = True
+    record = {
+        "tenant_id": tid, "job_id": _AUTONOMY_CONTROL_ID,
+        "record_type": "autonomy_control", "paused": paused,
+        "modes": current["modes"], "updated_at": int(time.time()),
+        "updated_by": getattr(request.state, "subject", ""),
+    }
+    _agent_jobs.put_item(Item=record)
+    return {"controls": _read_autonomy_controls(tid)}
+
+
+@app.post("/api/agents/jobs/{job_id}/approve", status_code=202)
+def approve_agent_job(job_id: str, request: Request):
+    tid = tenant(request)
+    if job_id == _AUTONOMY_CONTROL_ID:
+        raise HTTPException(status_code=422, detail="Invalid job ID.")
+    controls = _read_autonomy_controls(tid)
+    if controls["paused"]:
+        raise HTTPException(status_code=423, detail="AI operations are paused. Resume them before approving a job.")
+    try:
+        _agent_jobs.update_item(
+            Key={"tenant_id": tid, "job_id": job_id},
+            UpdateExpression="SET #s=:queued, approved_by=:actor, approved_at=:at",
+            ConditionExpression="#s=:awaiting",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":queued": "queued", ":awaiting": "awaiting_approval",
+                ":actor": getattr(request.state, "subject", ""), ":at": int(time.time()),
+            },
+        )
+        job = _agent_jobs.get_item(Key={"tenant_id": tid, "job_id": job_id}).get("Item") or {}
+        enqueue_job("agent", {"tenant_id": tid, "agent_id": job["agent_id"],
+                              "task": job["task"], "job_id": job_id})
+        return {"job_id": job_id, "status": "queued"}
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            raise HTTPException(status_code=409, detail="Job is not awaiting approval.")
+        raise HTTPException(status_code=503, detail="Could not approve agent job.")
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Could not queue approved job: " + type(exc).__name__)
 
 @app.get("/api/dashboard")
 def dashboard(request: Request):
@@ -444,19 +540,33 @@ def ingestion_complete(dataset_id: str, object_key: str, request: Request):
 
 @app.post("/api/agents/run", status_code=202)
 def run_agent(item: AgentRunIn, request: Request):
-    tid=tenant(request); job_id=str(uuid.uuid4())
-    record={"tenant_id":tid,"job_id":job_id,"agent_id":item.agent_id,
-            "status":"queued","task":item.task,"created_at":int(time.time()),
-            "requires_human_approval":True}
+    tid = tenant(request)
+    controls = _read_autonomy_controls(tid)
+    if controls["paused"]:
+        raise HTTPException(status_code=423, detail="AI operations are paused.")
+    mode = controls["modes"].get(item.agent_id, "human_in_loop")
+    job_id = str(uuid.uuid4())
+    status = "queued" if mode == "autonomous" else "awaiting_approval"
+    record = {
+        "tenant_id": tid, "job_id": job_id, "agent_id": item.agent_id,
+        "status": status, "task": item.task, "created_at": int(time.time()),
+        "execution_mode": mode, "requires_human_approval": mode == "human_in_loop",
+    }
     try:
-        _agent_jobs.put_item(Item=record,ConditionExpression="attribute_not_exists(job_id)")
-        queued_id=enqueue_job("agent",{"tenant_id":tid,"agent_id":item.agent_id,
-                                      "task":item.task,"job_id":job_id})
-        return {"job_id":queued_id,"status":"queued","requires_human_approval":True}
+        _agent_jobs.put_item(Item=record, ConditionExpression="attribute_not_exists(job_id)")
+        if mode == "autonomous":
+            enqueue_job("agent", {"tenant_id": tid, "agent_id": item.agent_id,
+                                  "task": item.task, "job_id": job_id})
+        return {
+            "job_id": job_id, "status": status, "execution_mode": mode,
+            "requires_human_approval": mode == "human_in_loop",
+        }
     except Exception as exc:
-        try: _agent_jobs.delete_item(Key={"tenant_id":tid,"job_id":job_id})
-        except Exception: pass
-        raise HTTPException(status_code=503,detail="Agent queue is unavailable: "+type(exc).__name__)
+        try:
+            _agent_jobs.delete_item(Key={"tenant_id": tid, "job_id": job_id})
+        except Exception:
+            pass
+        raise HTTPException(status_code=503, detail="Agent queue is unavailable: " + type(exc).__name__)
 
 @app.get("/api/agents/jobs/{job_id}")
 def get_agent_job(job_id: str, request: Request):
