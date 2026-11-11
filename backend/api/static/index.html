@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#101b2b"><title>Sudogemini Nexus</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1422;--panel:#111f31;--panel2:#16273b;--line:#263c55;--ink:#edf4fb;--muted:#9aacc0;--blue:#79aaff;--mint:#6cdbb4;--gold:#e3bd70;--red:#ff8d8d}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 80% 0%,#18314b 0,transparent 45%),var(--bg);color:var(--ink);font:14px Inter,system-ui,sans-serif}button,input,textarea,select{font:inherit}.wrap{max-width:1240px;margin:auto;padding:24px}.top{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:10px 0 24px;border-bottom:1px solid var(--line)}.brand{display:flex;align-items:center;gap:12px;font-weight:800;font-size:20px;letter-spacing:1.5px}.mark{width:38px;height:38px;border-radius:12px;background:linear-gradient(140deg,#8ab5ff,#64dbb5);color:#102035;display:grid;place-items:center;font-weight:900}.brand em{font-style:normal;color:var(--blue)}.topright{display:flex;align-items:center;gap:10px}.pill{border:1px solid var(--line);border-radius:99px;padding:7px 11px;color:var(--muted);font-size:11px}.btn{border:1px solid var(--line);border-radius:9px;background:#1b3049;color:var(--ink);padding:10px 14px;font-weight:650;cursor:pointer}.btn.primary{background:linear-gradient(120deg,#477cc9,#3aa887);border:0;color:#081626}.btn:disabled{opacity:.5;cursor:wait}.hero{padding:34px 0 22px}.eyebrow{color:var(--mint);font-size:11px;text-transform:uppercase;letter-spacing:2px}.hero h1{font-size:clamp(30px,4vw,44px);line-height:1.08;margin:12px 0 10px;letter-spacing:-1.5px}.hero p{color:var(--muted);max-width:690px;line-height:1.65;margin:0}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:20px 0}.card{background:linear-gradient(145deg,#15263a,#101d2d);border:1px solid var(--line);border-radius:15px;padding:18px;min-width:0;box-shadow:0 12px 35px #0002}.metric small{color:var(--muted)}.metric strong{display:block;font-size:28px;margin-top:10px}.layout{display:grid;grid-template-columns:1.2fr .8fr;gap:14px}.card h2{font-size:15px;margin:0 0 14px}.muted{color:var(--muted)}.agentlist{display:grid;grid-template-columns:repeat(2,1fr);gap:9px}.agent{padding:12px;border:1px solid var(--line);border-radius:10px;background:#0f1b2b}.agent b{display:block;font-size:12px}.agent span{display:block;color:var(--muted);font-size:11px;line-height:1.45;margin-top:5px}.field{display:grid;gap:6px;margin:10px 0}.field label{font-size:11px;color:var(--muted)}input,textarea,select{width:100%;background:#0b1726;color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:10px;outline:none}textarea{min-height:75px;resize:vertical}.formrow{display:grid;grid-template-columns:1fr 1fr;gap:10px}.status{font-size:12px;color:var(--muted);min-height:18px;margin-top:9px}.status.error{color:var(--red)}.status.good{color:var(--mint)}.hidden{display:none!important}.dataset{border-top:1px solid var(--line);padding:10px 0}.dataset b{font-size:12px}.dataset small{display:block;color:var(--muted);margin-top:5px}.badge{display:inline-block;color:var(--gold);border:1px solid #725d36;border-radius:99px;padding:3px 7px;font-size:10px}.authbox{max-width:480px;margin:35px auto}.tabs{display:flex;gap:8px;margin-bottom:15px}.tabs button{flex:1}.notice{border-left:3px solid var(--gold);padding:10px 12px;background:#2a2519;color:#d9c69f;font-size:11px;line-height:1.5;border-radius:0 8px 8px 0}.foot{text-align:center;color:#657b95;font-size:10px;padding:30px 0}.sectionhead{display:flex;justify-content:space-between;align-items:center;gap:12px}.mono{font:11px ui-monospace,monospace;overflow-wrap:anywhere;color:#b4c8df}
+@media(max-width:850px){.grid{grid-template-columns:repeat(2,1fr)}.layout{grid-template-columns:1fr}}@media(max-width:560px){.wrap{padding:15px}.top{align-items:flex-start}.topright{flex-direction:column;align-items:flex-end}.agentlist{grid-template-columns:1fr}.formrow{grid-template-columns:1fr}.hero{padding-top:25px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="top"><div class="brand"><div class="mark">S</div><div>SUDO<em>GEMINI</em></div></div><div class="topright"><span class="pill" id="connection">Checking service</span><button class="btn hidden" id="logout">Sign out</button></div></header>
+<section class="hero"><div class="eyebrow">Enterprise data intelligence · AWS</div><h1>Sudogemini Nexus</h1><p>A governed B2B data intelligence workspace for authorized datasets, customer scoping, provenance and controlled marketplace workflows.</p></section>
+<section id="auth" class="card authbox">
+<h2 id="authTitle">Access your workspace</h2>
+<div class="tabs"><button class="btn primary" id="showSignIn">Sign in</button><button class="btn" id="showSignUp">Create account</button></div>
+<div id="signinForm">
+<div class="field"><label>Email</label><input id="loginEmail" type="email" autocomplete="username" required></div>
+<div class="field"><label>Password</label><input id="loginPassword" type="password" autocomplete="current-password" required></div>
+<button class="btn primary" id="signIn">Sign in securely</button>
+</div>
+<div id="signupForm" class="hidden">
+<div class="field"><label>Email</label><input id="signupEmail" type="email" autocomplete="email" required></div>
+<div class="field"><label>Password (14+ characters, upper/lowercase, number and symbol)</label><input id="signupPassword" type="password" autocomplete="new-password" required minlength="14"></div>
+<button class="btn primary" id="signUp">Create account</button>
+</div>
+<div id="confirmForm" class="hidden">
+<div class="field"><label>Email verification code</label><input id="confirmCode" inputmode="numeric" autocomplete="one-time-code"></div>
+<button class="btn primary" id="confirmSignUp">Verify email</button>
+</div>
+<div class="status" id="authStatus"></div>
+<div class="notice" style="margin-top:15px">New accounts receive an isolated workspace. Dataset submissions remain pending review; creating an account does not grant data access or approve a license.</div>
+</section>
+<section id="app" class="hidden">
+<div class="sectionhead"><div><div class="eyebrow">Authenticated workspace</div><h2 style="font-size:22px;margin:8px 0">Operations overview</h2></div><button class="btn" id="refresh">Refresh</button></div>
+<div class="grid">
+<div class="card metric"><small>Registered AI workflows</small><strong id="agentCount">—</strong></div>
+<div class="card metric"><small>Datasets in workspace</small><strong id="datasetCount">—</strong></div>
+<div class="card metric"><small>Trades</small><strong id="tradeCount">—</strong></div>
+<div class="card metric"><small>Quantum runtime</small><strong id="quantumStatus" style="font-size:16px">—</strong></div>
+</div>
+<div class="layout">
+<div>
+<section class="card"><h2>Six-agent workflow system</h2><div class="agentlist" id="agents"><div class="muted">Loading workflow definitions…</div></div><p class="muted" style="font-size:11px;line-height:1.5;margin-bottom:0">These are governed workflow roles. Model execution, ingestion and external actions remain disabled until configured and approved.</p></section>
+<section class="card" style="margin-top:14px"><h2>Register a dataset</h2><div class="field"><label>Dataset name</label><input id="datasetName" maxlength="120"></div><div class="formrow"><div class="field"><label>Category</label><input id="datasetCategory" value="general" maxlength="80"></div><div class="field"><label>Declared record count</label><input id="recordCount" type="number" min="0" value="0"></div></div><div class="field"><label>Description</label><textarea id="datasetDescription" maxlength="2000"></textarea></div><div class="field"><label>Source reference</label><input id="datasetSource" value="user-submitted" maxlength="200"></div><button class="btn primary" id="createDataset">Submit for review</button><div class="status" id="datasetStatus"></div></section>
+<section class="card" style="margin-top:14px"><div class="sectionhead"><h2>Dataset catalog</h2><span class="pill">Tenant scoped</span></div><div id="datasets" class="muted">Loading datasets…</div></section>
+</div>
+<div>
+<section class="card"><h2>Service integrations</h2><div id="integrations" class="muted">Checking integrations…</div></section>
+<section class="card" style="margin-top:14px"><h2>Platform controls</h2><div class="notice">Trading and live billing are intentionally disabled until approvals, payment reconciliation and production controls are complete.</div><p class="muted" style="font-size:11px;line-height:1.6">Every dataset starts in <b>pending review</b>. No external source is fetched by this form. The platform stores metadata only; ingestion requires an approved connector and documented usage rights.</p><div class="status" id="apiStatus"></div></section>
+</div>
+</div>
+</section>
+<footer class="foot">SUDOGEMINI NEXUS · AWS US EAST (OHIO) · CONTROLLED DATA OPERATIONS</footer>
+</div>
+<script type="module">
+import { Amplify } from "https://esm.sh/aws-amplify@6.15.0";
+import { signIn as cognitoSignIn, signUp as cognitoSignUp, confirmSignUp, signOut, getCurrentUser, fetchAuthSession } from "https://esm.sh/aws-amplify@6.15.0/auth";
+
+Amplify.configure({Auth:{Cognito:{userPoolId:"us-east-2_yeNn9tWY7",userPoolClientId:"5kl6i9mong804ft96sp5c4fdm1",loginWith:{email:true}}}});
+const $=id=>document.getElementById(id);
+let pendingEmail="";
+function status(id,message,type=""){const el=$(id);el.textContent=message;el.className="status "+type}
+function showAuth(mode){$("signinForm").classList.toggle("hidden",mode!=="signin");$("signupForm").classList.toggle("hidden",mode!=="signup");$("confirmForm").classList.add("hidden");$("showSignIn").classList.toggle("primary",mode==="signin");$("showSignUp").classList.toggle("primary",mode==="signup");$("authTitle").textContent=mode==="signin"?"Access your workspace":"Create your workspace"}
+$("showSignIn").onclick=()=>showAuth("signin");$("showSignUp").onclick=()=>showAuth("signup");
+async function token(){const session=await fetchAuthSession();const t=session.tokens?.idToken;if(!t)throw Error("Sign in is required.");return t.toString()}
+async function api(path,options={}){const t=await token();const headers={...(options.headers||{}),Authorization:"Bearer "+t};if(options.body)headers["Content-Type"]="application/json";const res=await fetch(path,{...options,headers});const data=await res.json().catch(()=>({detail:"Invalid server response"}));if(!res.ok)throw Error(data.detail||data.error||"Request failed ("+res.status+")");return data}
+function escapeHtml(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+async function signedIn(){ $("auth").classList.add("hidden");$("app").classList.remove("hidden");$("logout").classList.remove("hidden");await refresh()}
+$("signUp").onclick=async()=>{const email=$("signupEmail").value.trim(),password=$("signupPassword").value;try{pendingEmail=email;await cognitoSignUp({username:email,password,options:{userAttributes:{email}}});$("signupForm").classList.add("hidden");$("confirmForm").classList.remove("hidden");status("authStatus","Check your email for the verification code.","good")}catch(e){status("authStatus",e.message,"error")}};
+$("confirmSignUp").onclick=async()=>{try{await confirmSignUp({username:pendingEmail,confirmationCode:$("confirmCode").value.trim()});status("authStatus","Email verified. Sign in to continue.","good");$("loginEmail").value=pendingEmail;showAuth("signin")}catch(e){status("authStatus",e.message,"error")}};
+$("signIn").onclick=async()=>{try{await cognitoSignIn({username:$("loginEmail").value.trim(),password:$("loginPassword").value});await signedIn()}catch(e){status("authStatus",e.message,"error")}};
+$("logout").onclick=async()=>{await signOut();$("app").classList.add("hidden");$("auth").classList.remove("hidden");$("logout").classList.add("hidden");status("authStatus","Signed out.")};
+async function refresh(){status("apiStatus","Refreshing workspace…");try{const [dash,agents,integrations,datasets]=await Promise.all([api("/api/dashboard"),api("/api/agents"),api("/api/integrations/status"),api("/api/datasets")]);$("agentCount").textContent=dash.agents;$("datasetCount").textContent=dash.datasets;$("tradeCount").textContent=dash.trades;$("quantumStatus").textContent=integrations.cuda_q.status;$("agents").innerHTML=agents.agents.map(a=>'<article class="agent"><b>'+escapeHtml(a.name)+'</b><span>'+escapeHtml(a.role)+'</span></article>').join("");$("integrations").innerHTML='<div class="dataset"><b>Stripe</b><small>'+escapeHtml(integrations.stripe.status)+' · checkout '+(integrations.stripe.checkout_enabled?"enabled":"disabled")+'</small></div><div class="dataset"><b>CUDA-Q</b><small>'+escapeHtml(integrations.cuda_q.status)+' · '+escapeHtml(integrations.cuda_q.backend)+'</small></div>';renderDatasets(datasets.items);status("apiStatus","Workspace loaded.","good")}catch(e){status("apiStatus",e.message,"error")}}
+function renderDatasets(items){$("datasets").innerHTML=items.length?items.map(d=>'<div class="dataset"><b>'+escapeHtml(d.name)+'</b> <span class="badge">'+escapeHtml(d.license_status||d.status||"pending_review")+'</span><small>'+escapeHtml(d.category||"general")+' · '+Number(d.record_count||0).toLocaleString()+' declared records</small><small>'+escapeHtml(d.description||"No description")+'</small></div>').join(""):'No datasets submitted yet.'}
+$("refresh").onclick=refresh;
+$("createDataset").onclick=async()=>{const b=$("createDataset");b.disabled=true;try{const item={name:$("datasetName").value.trim(),description:$("datasetDescription").value,category:$("datasetCategory").value.trim()||"general",source:$("datasetSource").value.trim()||"user-submitted",record_count:Number($("recordCount").value||0)};const created=await api("/api/datasets",{method:"POST",body:JSON.stringify(item)});status("datasetStatus","Submitted. Status: pending review.","good");$("datasetName").value="";await refresh()}catch(e){status("datasetStatus",e.message,"error")}finally{b.disabled=false}};
+$("connection").textContent="AWS API · "+location.host;
+try{await getCurrentUser();await signedIn()}catch{showAuth("signin")}
+</script>
+</body></html>
