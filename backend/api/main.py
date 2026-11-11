@@ -558,7 +558,7 @@ def create_trade_checkout(trade_id: str, request: Request):
     application_fee = int(round(amount_cents*fee_percent/100))
     base = os.getenv("APP_BASE_URL", "http://localhost:8000").rstrip("/")
     try:
-        session = sdk.checkout.Session.create(mode="payment",
+        session = sdk.checkout.Session.create(mode="payment",payment_method_types=["card"],
             line_items=[{"price_data":{"currency":"usd","unit_amount":amount_cents,
             "product_data":{"name":"Sudogemini dataset purchase "+trade["dataset_id"]}},"quantity":1}],
             payment_intent_data={"application_fee_amount":application_fee,
@@ -613,7 +613,7 @@ async def stripe_webhook(request: Request):
             raise HTTPException(status_code=503,detail="Stripe event idempotency store is unavailable.")
     try:
         metadata = obj.get("metadata") or {}
-        if event_type == "checkout.session.completed":
+        if event_type in ("checkout.session.completed","checkout.session.async_payment_succeeded"):
             trade_id, tid = metadata.get("trade_id"), metadata.get("tenant_id")
             if trade_id and tid and obj.get("payment_status") == "paid":
                 trade = _trades.get_item(Key={"tenant_id":tid,"record_id":trade_id}).get("Item")
