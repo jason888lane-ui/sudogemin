@@ -192,17 +192,22 @@ async def cognito_authentication(request: Request, call_next):
             )
             if claims.get("token_use") != "id":
                 return _unauthorized()
-            # Until a server-side organization-membership directory is implemented,
-            # bind each Cognito subject to its own tenant. Do not trust custom tenant
-            # claims here: Cognito app-client write permissions and user-pool schema
-            # mutability must be verified before any organization claim can authorize
-            # access. Never accept tenant IDs from request bodies or query parameters.
             subject = tenant_id_from_claims(claims)
-            tenant_id = resolve_tenant_id(subject)
-            request.state.tenant_id = tenant_id
-            request.state.subject = claims["sub"]
         except Exception:
             return _unauthorized()
+        # Organization identity is resolved only from the server-managed directory.
+        # Never accept tenant IDs from request bodies, query parameters, or editable
+        # Cognito custom attributes.
+        try:
+            tenant_id = resolve_tenant_id(subject)
+        except Exception:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "Tenant membership service is temporarily unavailable"},
+            )
+        request.state.tenant_id = tenant_id
+        request.state.subject = subject
     return await call_next(request)
 
 async def _auth_unavailable():
