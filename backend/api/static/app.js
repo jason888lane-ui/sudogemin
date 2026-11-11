@@ -34,6 +34,8 @@ function renderAutonomy(controls){
  const pause=$("aiGlobalPause");
  pause.checked=!!controls.paused;
  pause.disabled=!!controls.global_pause;
+ $("aiEnabled").checked=controls.ai_enabled!==false;
+ $("humanApprovalRequired").checked=controls.human_approval_required!==false;
  const modes=controls.modes||{};
  $("autonomyAgentControls").innerHTML=["ingestion","quality","scoping","marketplace","sales","governance"].map(id=>{
   const label=({ingestion:"Ingestion",quality:"Data quality",scoping:"Customer scoping",marketplace:"Marketplace",sales:"Sales",governance:"Governance"})[id];
@@ -48,9 +50,9 @@ $("saveAutonomy").onclick=async()=>{
  try{
   const modes={};
   document.querySelectorAll("[data-agent-mode]").forEach(el=>{modes[el.dataset.agentMode]=el.value});
-  const result=await api("/api/agents/controls",{method:"PUT",body:JSON.stringify({paused:$("aiGlobalPause").checked,modes})});
+  const result=await api("/api/agents/controls",{method:"PUT",body:JSON.stringify({paused:$("aiGlobalPause").checked,ai_enabled:$("aiEnabled").checked,human_approval_required:$("humanApprovalRequired").checked,modes})});
   renderAutonomy(result.controls);
-  status("autonomyStatus","Autonomy settings saved.","good");
+  status("autonomyStatus","Autonomy settings saved. AI execution: "+(result.controls.ai_enabled?"ON":"OFF")+". Human approval: "+(result.controls.human_approval_required?"REQUIRED":"NOT REQUIRED")+".","good");
  }catch(e){status("autonomyStatus",e.message,"error")}
  finally{button.disabled=false}
 };
