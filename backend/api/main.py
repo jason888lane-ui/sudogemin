@@ -393,6 +393,8 @@ def approve_agent_job(job_id: str, request: Request):
     controls = _read_autonomy_controls(tid)
     if controls["paused"]:
         raise HTTPException(status_code=423, detail="AI operations are paused. Resume them before approving a job.")
+    if not controls["ai_enabled"]:
+        raise HTTPException(status_code=423, detail="AI execution is switched off. Enable it before approving a job.")
     try:
         _agent_jobs.update_item(
             Key={"tenant_id": tid, "job_id": job_id},
