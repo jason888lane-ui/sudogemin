@@ -10,13 +10,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt requirements-cudaq.txt .
+COPY requirements.txt .
 RUN python -m pip install --upgrade pip \
-    && python -m pip install --no-cache-dir -r requirements-cudaq.txt
-
-# Fail the image build if CUDA-Q cannot import or execute on its CPU simulator.
-COPY cudaq_smoke_test.py .
-RUN python cudaq_smoke_test.py
+    && python -m pip install --no-cache-dir -r requirements.txt
 
 COPY main.py personal_intelligence.py ./
 COPY static ./static
