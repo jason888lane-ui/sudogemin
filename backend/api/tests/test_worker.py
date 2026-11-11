@@ -89,7 +89,7 @@ class WorkerLeaseTests(unittest.TestCase):
     @patch("worker._jobs_table")
     @patch.dict("os.environ", {"DATASETS_TABLE": "datasets"})
     def test_terminal_ingestion_failure_marks_dataset_only_for_matching_job(
-        self, get_table, resource
+        self, resource, get_table
     ):
         get_table.return_value = self.table
         dataset_table = MagicMock()
