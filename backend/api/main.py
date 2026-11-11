@@ -185,7 +185,7 @@ def dashboard(request: Request):
     tid = tenant(request)
     ds_count = _datasets.query(Select="COUNT", KeyConditionExpression=Key("tenant_id").eq(tid))["Count"]
     trade_count = _trades.query(Select="COUNT", KeyConditionExpression=Key("tenant_id").eq(tid))["Count"]
-    return {"platform": APP_NAME, "owner": OWNER, "agents": len(AGENTS),
+    return {"platform": APP_NAME, "agents": len(AGENTS),
             "datasets": ds_count, "trades": trade_count,
             "quantum": quantum_status(), "payments": stripe_status(),
             "approval_required": True, "tenant_scoped": True}
@@ -354,7 +354,8 @@ def marketplace_listings():
         result=_marketplace.query(IndexName="status-created-index",
             KeyConditionExpression=Key("status").eq("approved"),
             ScanIndexForward=False,Limit=100)
-        return {"items":result.get("Items",[]),"count":len(result.get("Items",[]))}
+        items=[{k:v for k,v in row.items() if k!="seller_tenant_id"} for row in result.get("Items",[])]
+        return {"items":items,"count":len(items)}
     except Exception as exc:
         raise HTTPException(status_code=503,detail="Marketplace catalog is not provisioned: "+type(exc).__name__)
 
@@ -449,7 +450,7 @@ def seller_approve_trade(trade_id: str,request: Request):
 def list_trades(request: Request):
     tid = tenant(request)
     response = _trades.query(KeyConditionExpression=Key("tenant_id").eq(tid))
-    items = [{k: v for k, v in item.items() if k != "tenant_id"} for item in response.get("Items", [])]
+    items = [{k: v for k, v in item.items() if k not in {"tenant_id","buyer_tenant_id","seller_tenant_id"}} for item in response.get("Items", [])]
     return {"items": items, "count": len(items)}
 
 @app.get("/api/verify/{trade_id}")
