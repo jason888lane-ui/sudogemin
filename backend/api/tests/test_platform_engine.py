@@ -18,6 +18,16 @@ class IngestionValidationTests(unittest.TestCase):
         result = inspect_csv_or_json(data, "application/x-ndjson")
         self.assertEqual(result["record_count"], 2)
 
+    def test_json_array_record_count(self):
+        data = b'[{"company":"Acme"},{"company":"Northwind"}]'
+        result = inspect_csv_or_json(data, "application/json")
+        self.assertEqual(result["record_count"], 2)
+
+    def test_json_schema_drift_is_rejected(self):
+        data = b'[{"company":"Acme"},{"organization":"Northwind"}]'
+        with self.assertRaisesRegex(ValueError, "consistent schema"):
+            inspect_csv_or_json(data, "application/json")
+
     def test_sensitive_columns_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "sensitive personal-data"):
             inspect_csv_or_json(b"company,email\nAcme,person@example.com\n", "text/csv")
