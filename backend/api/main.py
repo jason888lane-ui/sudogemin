@@ -3,13 +3,15 @@ import json
 import os
 import time
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 import boto3
 from boto3.dynamodb.conditions import Key
 import jwt
 from jwt import PyJWKClient
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from personal_intelligence import executive_guidance
 
@@ -38,7 +40,19 @@ _dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
 _datasets = _dynamodb.Table(DATASETS_TABLE)
 _trades = _dynamodb.Table(TRADES_TABLE)
 
-app = FastAPI(title=APP_NAME, version="1.1.0", description="Tenant-authenticated B2B data brokerage API")
+app = FastAPI(title=APP_NAME, version="1.2.0", description="Tenant-authenticated B2B data brokerage API")
+
+_allowed_origins = [x.strip() for x in os.getenv(
+    "CORS_ORIGINS",
+    "https://sudogemini.com,https://www.sudogemini.com,https://app.sudogemini.com"
+).split(",") if x.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allowed_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+)
 
 AGENTS = [
     {"id": "ingestion", "name": "Ingestion Agent", "role": "Register approved sources and preserve provenance and license evidence"},
@@ -55,7 +69,7 @@ class DatasetIn(BaseModel):
     category: str = Field(default="general", max_length=80)
     source: str = Field(default="user-submitted", max_length=200)
     record_count: int = Field(default=0, ge=0)
-    license_status: str = Field(default="pending_review")
+    license_status: Literal["pending_review"] = "pending_review"
 
 class MatchIn(BaseModel):
     buyer_id: str
@@ -98,7 +112,9 @@ async def cognito_authentication(request: Request, call_next):
             )
             if claims.get("token_use") != "id":
                 return _unauthorized()
-            tenant_id = claims.get("custom:tenant_id")
+            # Users without an administrator-assigned organization claim get an isolated tenant keyed by verified Cognito sub.
+            # Never accept tenant IDs from request bodies or query parameters.
+            tenant_id = claims.get("custom:tenant_id") or claims["sub"]
             if not isinstance(tenant_id, str) or not tenant_id.strip():
                 return _unauthorized()
             request.state.tenant_id = tenant_id
@@ -117,8 +133,10 @@ def _unauthorized():
 
 @app.get("/")
 def home():
-    return {"name": APP_NAME, "status": "operational", "version": app.version,
-            "message": "Sudogemini API is running", "docs": "/docs"}
+    index = os.path.join(os.path.dirname(__file__), "static", "index.html")
+    if os.path.isfile(index):
+        return FileResponse(index, media_type="text/html")
+    return {"name": APP_NAME, "status": "operational", "version": app.version, "docs": "/docs"}
 
 @app.get("/health")
 def health():
@@ -133,7 +151,7 @@ def agents():
 def dashboard(request: Request):
     tid = tenant(request)
     ds_count = _datasets.query(Select="COUNT", KeyConditionExpression=Key("tenant_id").eq(tid))["Count"]
-    trade_count = _trades.query(Select="COUNT", KeyConditionExpression=__import__("boto3").dynamodb.conditions.Key("tenant_id").eq(tid))["Count"]
+    trade_count = _trades.query(Select="COUNT", KeyConditionExpression=Key("tenant_id").eq(tid))["Count"]
     return {"platform": APP_NAME, "owner": OWNER, "agents": len(AGENTS),
             "datasets": ds_count, "trades": trade_count,
             "quantum": quantum_status(), "payments": stripe_status(),
@@ -162,7 +180,7 @@ def create_dataset(item: DatasetIn, request: Request):
 @app.get("/api/datasets")
 def list_datasets(request: Request):
     tid = tenant(request)
-    response = _datasets.query(KeyConditionExpression=__import__("boto3").dynamodb.conditions.Key("tenant_id").eq(tid))
+    response = _datasets.query(KeyConditionExpression=Key("tenant_id").eq(tid))
     items = [{k: v for k, v in item.items() if k != "tenant_id"} for item in response.get("Items", [])]
     return {"items": items, "count": len(items)}
 
@@ -170,7 +188,7 @@ def list_datasets(request: Request):
 def match_buyer(item: MatchIn, request: Request):
     tid = tenant(request)
     terms = {term.lower() for term in item.requirements}
-    response = _datasets.query(KeyConditionExpression=__import__("boto3").dynamodb.conditions.Key("tenant_id").eq(tid))
+    response = _datasets.query(KeyConditionExpression=Key("tenant_id").eq(tid))
     results = []
     for ds in response.get("Items", []):
         text = " ".join([ds["name"], ds.get("description", ""), ds.get("category", "")]).lower()
@@ -187,7 +205,7 @@ def create_trade(item: TradeIn):
 @app.get("/api/trades")
 def list_trades(request: Request):
     tid = tenant(request)
-    response = _trades.query(KeyConditionExpression=__import__("boto3").dynamodb.conditions.Key("tenant_id").eq(tid))
+    response = _trades.query(KeyConditionExpression=Key("tenant_id").eq(tid))
     items = [{k: v for k, v in item.items() if k != "tenant_id"} for item in response.get("Items", [])]
     return {"items": items, "count": len(items)}
 
