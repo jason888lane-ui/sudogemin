@@ -102,9 +102,18 @@ Resources:
       AttributeDefinitions:
         - AttributeName: tenant_id
           AttributeType: S
+        - AttributeName: subscription_id
+          AttributeType: S
       KeySchema:
         - AttributeName: tenant_id
           KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: subscription-id-index
+          KeySchema:
+            - AttributeName: subscription_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
       SSESpecification:
         SSEEnabled: true
       PointInTimeRecoverySpecification:
@@ -131,7 +140,7 @@ Resources:
               - !GetAtt StripeEventsTable.Arn
               - !GetAtt SubscriptionsTable.Arn
           - Effect: Allow
-            Action: [bedrock:InvokeModel, bedrock:Converse]
+            Action: [bedrock:InvokeModel]
             Resource: "*"
 Outputs:
   IngestionBucketName:
