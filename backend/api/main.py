@@ -225,6 +225,13 @@ def home():
         return FileResponse(index, media_type="text/html")
     return {"name": APP_NAME, "status": "operational", "version": app.version, "docs": "/docs"}
 
+@app.get("/app.bundle.js")
+def application_bundle():
+    script = os.path.join(os.path.dirname(__file__), "static", "app.bundle.js")
+    if not os.path.isfile(script):
+        raise HTTPException(status_code=503, detail="Application bundle is not built.")
+    return FileResponse(script, media_type="text/javascript", headers={"Cache-Control": "no-cache"})
+
 @app.get("/platform.js")
 def platform_dashboard_script():
     script = os.path.join(os.path.dirname(__file__), "static", "platform.js")
