@@ -62,7 +62,7 @@ This implementation does not create a Stripe product/price, connect a seller, ac
 
 ## AWS resources and runtime configuration
 
-Review and deploy `infra/marketplace-platform.yaml` after confirming account, region, task role, existing datasets/trades table ARNs, and expected AWS costs. Supply `DatasetsTableArn` and `TradesTableArn` as stack parameters. It provisions a private encrypted/versioned S3 bucket, SQS queue + DLQ, and DynamoDB tables for marketplace listings, agent jobs, Stripe events, and subscriptions. It attaches a runtime policy to the supplied ECS task role. These resources are not deployed by this PR.
+Review and deploy `infra/marketplace-platform.yaml` after confirming account, region, task role, existing datasets/trades table ARNs, and expected AWS costs. Supply `DatasetsTableArn`, `TradesTableArn`, `DatasetsTableName`, `TaskRoleName`, `WorkerImageUri`, `WorkerExecutionRoleArn`, `WorkerClusterArn`, `WorkerSubnetIds`, `WorkerSecurityGroupIds`, and a verified `BedrockModelId` as stack parameters. Set `WorkerDesiredCount=0` during initial stack creation; increase to 1 only after staging smoke tests and cost approval. It provisions a private encrypted/versioned S3 bucket, SQS queue + DLQ, and DynamoDB tables for marketplace listings, agent jobs, tenant memberships, Stripe events, and subscriptions. It attaches a runtime policy to the supplied ECS task role and defines a separate Fargate worker task/service. The worker service defaults to desired count 0 so no worker compute runs until explicitly enabled after image/model/network verification. These resources are not deployed by this PR.
 
 Configure these environment values from CloudFormation outputs:
 - `INGESTION_BUCKET`
@@ -79,7 +79,7 @@ Configure these environment values from CloudFormation outputs:
 - Live mode: `STRIPE_LIVE_SECRET_KEY`, `STRIPE_LIVE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`, and `STRIPE_LIVE_ENABLED=false` until the owner approves release
 - `STRIPE_MODE=test` by default; `STRIPE_CONNECT_ENABLED=false`, `REQUIRE_ACTIVE_SUBSCRIPTION=false`, and an explicit `MARKETPLACE_FEE_PERCENT` remain required controls
 
-Run the worker as a separate ECS service using the same image and command `python worker.py`. The API image includes the worker module, but this PR does not create a new Fargate worker service or change the existing ECS service.
+The template defines a separate ECS worker service using the same image and command `python worker.py`; its desired count defaults to zero. This PR does not deploy the template or change the existing API service/task definition.
 
 ## Release gates still outstanding
 
