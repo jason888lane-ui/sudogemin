@@ -553,8 +553,8 @@ def create_trade_checkout(trade_id: str, request: Request):
     seller_tid = trade.get("seller_tenant_id")
     seller = _subscriptions.get_item(Key={"tenant_id":seller_tid}).get("Item") if seller_tid else None
     connected_account = (seller or {}).get("stripe_account_id")
-    if not connected_account or not (seller or {}).get("charges_enabled") or not (seller or {}).get("payouts_enabled"):
-        raise HTTPException(status_code=409,detail="Seller must complete Stripe Connect onboarding and enable charges and payouts before checkout.")
+    if not connected_account or not (seller or {}).get("transfers_enabled") or not (seller or {}).get("payouts_enabled"):
+        raise HTTPException(status_code=409,detail="Seller must complete Stripe Connect onboarding and enable transfers and payouts before checkout.")
     amount_cents = int(Decimal(str(trade["amount_usd"]))*100)
     fee_raw = os.getenv("MARKETPLACE_FEE_PERCENT","").strip()
     if not fee_raw:
@@ -648,9 +648,9 @@ async def stripe_webhook(request: Request):
             tid = metadata.get("tenant_id")
             if tid:
                 _subscriptions.update_item(Key={"tenant_id":tid},
-                    UpdateExpression="SET charges_enabled=:c, payouts_enabled=:p, seller_onboarding_status=:s, updated_at=:t",
-                    ExpressionAttributeValues={":c":bool(obj.get("charges_enabled")),":p":bool(obj.get("payouts_enabled")),
-                        ":s":"complete" if obj.get("details_submitted") and obj.get("payouts_enabled") else "incomplete",":t":int(time.time())})
+                    UpdateExpression="SET transfers_enabled=:x, payouts_enabled=:p, seller_onboarding_status=:s, updated_at=:t",
+                    ExpressionAttributeValues={":x":(obj.get("capabilities") or {}).get("transfers")=="active",":p":bool(obj.get("payouts_enabled")),
+                        ":s":"complete" if obj.get("details_submitted") and obj.get("payouts_enabled") and (obj.get("capabilities") or {}).get("transfers")=="active" else "incomplete",":t":int(time.time())})
         elif event_type in ("customer.subscription.created","customer.subscription.updated","customer.subscription.deleted"):
             tid = metadata.get("tenant_id")
             if tid:
