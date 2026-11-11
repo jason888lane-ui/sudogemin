@@ -49,6 +49,7 @@ The header-based sensitive-data check is only a guardrail; it is not a legal det
 ## Billing and seller payouts
 
 - Stripe starts in test mode only when `STRIPE_MODE=test`, `STRIPE_TEST_ENABLED=true`, a valid `sk_test_` key, a test price ID, and a test webhook secret are configured. Live mode separately requires `STRIPE_MODE=live`, `STRIPE_LIVE_ENABLED=true`, a valid `sk_live_` key, a live price ID, and a live webhook secret. Keep live mode disabled until test transactions and owner approval are complete.
+- Subscription Checkout creation and Stripe Connect Express account creation use tenant-scoped Stripe idempotency keys to reduce duplicate subscriptions/accounts during retries. Marketplace checkout already uses a trade-scoped idempotency key. These keys do not replace webhook idempotency or financial reconciliation.
 - Stripe Connect onboarding is disabled unless `STRIPE_CONNECT_ENABLED=true`. It creates Express connected accounts and onboarding links only when the authenticated seller calls the endpoint.
 - Checkout uses a destination charge and an explicitly configured `MARKETPLACE_FEE_PERCENT` (0–30; no default fee is assumed) only after Stripe reports that seller transfers capability and payouts are enabled.
 - Signed test/live webhook events use a mode-specific signing secret and are recorded by event ID before processing. Subscription changes, invoice status, Connect account readiness, paid orders, refunds, and disputes are handled.
