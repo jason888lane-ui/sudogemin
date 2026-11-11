@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from botocore.exceptions import ClientError
-from worker import claim_job, complete_job, decode_message, release_job
+from worker import claim_job, complete_job, decode_message, mark_terminal_failure, release_job
 
 
 class WorkerMessageTests(unittest.TestCase):
@@ -68,6 +68,21 @@ class WorkerLeaseTests(unittest.TestCase):
         self.assertEqual(kwargs["ExpressionAttributeValues"][":queued"], "queued")
         self.assertEqual(kwargs["ExpressionAttributeValues"][":error"], "ValueError")
         self.assertIn("REMOVE lease_owner", kwargs["UpdateExpression"])
+
+
+    @patch("worker._jobs_table")
+    def test_terminal_agent_failure_is_fenced_and_removes_lease(self, get_table):
+        get_table.return_value = self.table
+        mark_terminal_failure(self.message, RuntimeError("model unavailable"), "owner-1")
+        kwargs = self.table.update_item.call_args.kwargs
+        self.assertIn("lease_owner = :owner", kwargs["ConditionExpression"])
+        self.assertEqual(kwargs["ExpressionAttributeValues"][":failed"], "failed")
+        self.assertIn("REMOVE lease_owner", kwargs["UpdateExpression"])
+
+    @patch("worker._jobs_table")
+    def test_terminal_failure_without_lease_owner_is_ignored(self, get_table):
+        mark_terminal_failure(self.message, RuntimeError("failure"), None)
+        get_table.assert_not_called()
 
 
 if __name__ == "__main__":
