@@ -84,6 +84,7 @@ class MatchIn(BaseModel):
 
 class TradeIn(BaseModel):
     listing_id: str = Field(min_length=1, max_length=100)
+    accept_license: bool = False
 
 class ListingIn(BaseModel):
     dataset_id: str = Field(min_length=1, max_length=100)
@@ -351,6 +352,8 @@ def approve_listing(listing_id: str,request: Request):
 def create_trade(item: TradeIn,request: Request):
     buyer_tid=tenant(request)
     enforce_paid_entitlement(request)
+    if not item.accept_license:
+        raise HTTPException(status_code=422,detail="Explicit acceptance of the listing license terms is required.")
     rows=_marketplace.query(KeyConditionExpression=Key("status").eq("approved"))
     listing=next((x for x in rows.get("Items",[]) if x.get("listing_id")==item.listing_id),None)
     if not listing: raise HTTPException(status_code=404,detail="Approved marketplace listing not found.")
@@ -636,6 +639,36 @@ async def stripe_webhook(request: Request):
         except Exception: pass
         raise HTTPException(status_code=500,detail="Webhook processing failed; Stripe may retry: "+type(exc).__name__)
     return {"received": True, "event_type": event_type}
+
+@app.post("/api/trades/{trade_id}/download")
+def download_trade_dataset(trade_id: str, request: Request):
+    buyer_tid=tenant(request)
+    trade=_trades.get_item(Key={"tenant_id":buyer_tid,"record_id":trade_id}).get("Item")
+    if not trade or trade.get("role")=="seller":
+        raise HTTPException(status_code=404,detail="Buyer order not found.")
+    if trade.get("status") not in {"paid_pending_fulfillment","fulfilled"} or trade.get("payment_status")!="paid":
+        raise HTTPException(status_code=409,detail="Dataset access is available only after verified payment and seller approval.")
+    seller_tid=trade.get("seller_tenant_id")
+    dataset=_datasets.get_item(Key={"tenant_id":seller_tid,"record_id":trade["dataset_id"]}).get("Item")
+    if not dataset or dataset.get("license_status")!="approved" or dataset.get("ingestion_status")!="validated" or not dataset.get("object_key"):
+        raise HTTPException(status_code=409,detail="The licensed dataset has not passed ingestion validation.")
+    try:
+        bucket=os.getenv("INGESTION_BUCKET","")
+        if not bucket: raise RuntimeError("INGESTION_BUCKET is not configured")
+        url=boto3.client("s3",region_name=AWS_REGION).generate_presigned_url(
+            "get_object",Params={"Bucket":bucket,"Key":dataset["object_key"]},ExpiresIn=300)
+        if trade.get("status")=="paid_pending_fulfillment":
+            _trades.update_item(Key={"tenant_id":buyer_tid,"record_id":trade_id},
+                UpdateExpression="SET #s=:fulfilled, fulfilled_at=:at",
+                ExpressionAttributeNames={"#s":"status"},
+                ExpressionAttributeValues={":fulfilled":"fulfilled",":at":int(time.time())})
+            _trades.update_item(Key={"tenant_id":seller_tid,"record_id":"seller#"+trade_id},
+                UpdateExpression="SET #s=:fulfilled, fulfilled_at=:at",
+                ExpressionAttributeNames={"#s":"status"},
+                ExpressionAttributeValues={":fulfilled":"fulfilled",":at":int(time.time())})
+        return {"download_url":url,"expires_in":300,"license_summary":"Use only within the license terms accepted at checkout."}
+    except Exception as exc:
+        raise HTTPException(status_code=503,detail="Dataset delivery is unavailable: "+type(exc).__name__)
 
 @app.post("/api/quantum/match")
 def quantum_match(item: QuantumMatchIn):
