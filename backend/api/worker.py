@@ -178,6 +178,19 @@ def mark_terminal_failure(
             )
 
 
+def terminal_provider_error_code(error: Exception) -> str | None:
+    """Return provider errors that should fail fast instead of burning SQS retries."""
+    if not isinstance(error, ClientError):
+        return None
+    code = error.response.get("Error", {}).get("Code", "")
+    terminal = {
+        "ThrottlingException", "ServiceQuotaExceededException",
+        "AccessDeniedException", "ResourceNotFoundException",
+        "ValidationException",
+    }
+    return code if code in terminal else None
+
+
 def decode_message(body: str) -> dict:
     """Decode one queue message and reject non-object JSON payloads."""
     message = json.loads(body)
@@ -214,16 +227,8 @@ def main() -> None:
                     QueueUrl=queue_url, ReceiptHandle=item["ReceiptHandle"]
                 )
             except Exception as exc:
-                error_code = (
-                    exc.response.get("Error", {}).get("Code", "")
-                    if isinstance(exc, ClientError) else ""
-                )
-                terminal_provider_errors = {
-                    "ThrottlingException", "ServiceQuotaExceededException",
-                    "AccessDeniedException", "ResourceNotFoundException",
-                    "ValidationException",
-                }
-                if error_code in terminal_provider_errors and message:
+                error_code = terminal_provider_error_code(exc)
+                if error_code and message:
                     # Model quota/access/configuration failures will not heal through
                     # rapid SQS redelivery. Persist a visible terminal failure and
                     # remove this delivery instead of burning retries or DLQ capacity.
