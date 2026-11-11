@@ -54,6 +54,20 @@ class ApiReadinessTests(unittest.TestCase):
         self.assertEqual(main.digest("sudogemini"), main.digest("sudogemini"))
         self.assertNotEqual(main.digest("sudogemini"), main.digest("different"))
 
+    def test_home_serves_dashboard(self):
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Sudogemini Nexus", response.text)
+        self.assertIn("Access your workspace", response.text)
+
+    def test_dataset_cannot_self_approve_license(self):
+        with self.assertRaises(Exception):
+            main.DatasetIn(name="test dataset", license_status="approved")
+
+    def test_dataset_default_license_state_requires_review(self):
+        item = main.DatasetIn(name="test dataset")
+        self.assertEqual(item.license_status, "pending_review")
+
 
 if __name__ == "__main__":
     unittest.main()
