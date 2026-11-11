@@ -567,7 +567,8 @@ def create_trade_checkout(trade_id: str, request: Request):
             success_url=base+"/?trade="+trade_id+"&payment=success",
             cancel_url=base+"/?trade="+trade_id+"&payment=cancelled",
             metadata={"trade_id":trade_id,"tenant_id":tid,"seller_tenant_id":seller_tid,
-                "merkle_root":trade["merkle_root"]})
+                "merkle_root":trade["merkle_root"]},
+            idempotency_key="sudogemini-marketplace-"+trade_id)
         _trades.update_item(Key={"tenant_id":tid,"record_id":trade_id},
             UpdateExpression="SET stripe_session_id=:sid, payment_status=:status",
             ExpressionAttributeValues={":sid":session.id,":status":"checkout_created"})
