@@ -59,7 +59,7 @@ Resources:
   PlatformJobsQueue:
     Type: AWS::SQS::Queue
     Properties:
-      VisibilityTimeout: 240
+      VisibilityTimeout: 3600
       MessageRetentionPeriod: 345600
       SqsManagedSseEnabled: true
       RedrivePolicy:
