@@ -241,8 +241,7 @@ class ApiReadinessTests(unittest.TestCase):
 
 
     def test_autonomy_defaults_to_enabled_ai_with_human_approval(self):
-        with patch.object(main, "_agent_jobs") as table, \\
-             patch.dict(os.environ, {"AI_GLOBAL_PAUSE": "false"}):
+        with patch.object(main, "_agent_jobs") as table, patch.dict(os.environ, {"AI_GLOBAL_PAUSE": "false"}):
             table.get_item.return_value = {}
             controls = main._read_autonomy_controls("tenant-a")
         self.assertTrue(controls["ai_enabled"])
