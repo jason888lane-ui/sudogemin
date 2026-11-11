@@ -160,5 +160,23 @@ class WorkerApprovalGateTests(unittest.TestCase):
         self.assertIn("paused", update["ExpressionAttributeValues"].values())
 
 
+class ProviderErrorClassificationTests(unittest.TestCase):
+    def test_bedrock_quota_and_access_errors_fail_fast(self):
+        from worker import terminal_provider_error_code
+        for code in ("ThrottlingException", "ServiceQuotaExceededException",
+                     "AccessDeniedException", "ResourceNotFoundException",
+                     "ValidationException"):
+            with self.subTest(code=code):
+                error = ClientError({"Error": {"Code": code, "Message": "test"}}, "Converse")
+                self.assertEqual(terminal_provider_error_code(error), code)
+
+    def test_transient_or_unknown_errors_keep_retry_behavior(self):
+        from worker import terminal_provider_error_code
+        error = ClientError({"Error": {"Code": "InternalServerException",
+                                       "Message": "test"}}, "Converse")
+        self.assertIsNone(terminal_provider_error_code(error))
+        self.assertIsNone(terminal_provider_error_code(RuntimeError("network reset")))
+
+
 if __name__ == "__main__":
     unittest.main()
