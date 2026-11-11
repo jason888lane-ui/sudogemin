@@ -85,6 +85,22 @@ Resources:
         SSEEnabled: true
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: true
+  TenantMembershipsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: member_sub
+          AttributeType: S
+      KeySchema:
+        - AttributeName: member_sub
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
   MarketplaceTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Retain
@@ -186,6 +202,7 @@ Resources:
             Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem]
             Resource:
               - !GetAtt AgentJobsTable.Arn
+              - !GetAtt TenantMembershipsTable.Arn
               - !GetAtt MarketplaceTable.Arn
               - !GetAtt StripeEventsTable.Arn
               - !GetAtt SubscriptionsTable.Arn
@@ -204,6 +221,8 @@ Outputs:
     Value: !Ref PlatformJobsQueue
   AgentJobsTableName:
     Value: !Ref AgentJobsTable
+  TenantMembershipsTableName:
+    Value: !Ref TenantMembershipsTable
   MarketplaceTableName:
     Value: !Ref MarketplaceTable
   StripeEventsTableName:
