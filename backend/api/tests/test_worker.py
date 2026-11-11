@@ -88,7 +88,7 @@ class WorkerLeaseTests(unittest.TestCase):
     @patch("worker.boto3.resource")
     @patch("worker._jobs_table")
     def test_terminal_ingestion_failure_marks_dataset_only_for_matching_job(
-        self, resource, get_table
+        self, get_table, resource
     ):
         get_table.return_value = self.table
         dataset_table = MagicMock()
