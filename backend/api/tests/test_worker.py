@@ -108,5 +108,57 @@ class WorkerLeaseTests(unittest.TestCase):
 
 
 
+class WorkerApprovalGateTests(unittest.TestCase):
+    def _message(self):
+        return {"kind": "agent", "tenant_id": "tenant-a", "job_id": "job-1",
+                "agent_id": "quality", "task": "Review dataset metadata"}
+
+    def test_explicit_approval_overrides_human_approval_default(self):
+        import worker
+        table = MagicMock()
+        table.get_item.side_effect = [
+            {"Item": {"human_approval_required": True, "ai_enabled": True,
+                      "modes": {"quality": "human_in_loop"}}},
+            {"Item": {"approved_by": "reviewer-sub"}},
+        ]
+        with patch.object(worker, "_jobs_table", return_value=table), \
+             patch.object(worker, "run_agent", return_value={"summary": "ok"}) as run, \
+             patch.object(worker, "save_job_result") as save:
+            worker.handle(self._message(), "lease-1")
+        run.assert_called_once()
+        save.assert_called_once()
+
+    def test_unapproved_job_waits_when_human_approval_is_required(self):
+        import worker
+        table = MagicMock()
+        table.get_item.side_effect = [
+            {"Item": {"human_approval_required": True, "ai_enabled": True,
+                      "modes": {"quality": "autonomous"}}},
+            {"Item": {}},
+        ]
+        with patch.object(worker, "_jobs_table", return_value=table), \
+             patch.object(worker, "run_agent") as run:
+            worker.handle(self._message(), "lease-1")
+        run.assert_not_called()
+        update = table.update_item.call_args.kwargs
+        self.assertIn("awaiting_approval", update["ExpressionAttributeValues"].values())
+
+    def test_emergency_pause_blocks_even_an_approved_job(self):
+        import worker
+        table = MagicMock()
+        table.get_item.side_effect = [
+            {"Item": {"human_approval_required": False, "ai_enabled": True,
+                      "paused": True, "modes": {"quality": "autonomous"}}},
+            {"Item": {"approved_by": "reviewer-sub"}},
+        ]
+        with patch.dict("os.environ", {"AI_GLOBAL_PAUSE": "false"}), \
+             patch.object(worker, "_jobs_table", return_value=table), \
+             patch.object(worker, "run_agent") as run:
+            worker.handle(self._message(), "lease-1")
+        run.assert_not_called()
+        update = table.update_item.call_args.kwargs
+        self.assertIn("paused", update["ExpressionAttributeValues"].values())
+
+
 if __name__ == "__main__":
     unittest.main()
