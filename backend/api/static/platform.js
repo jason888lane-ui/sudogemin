@@ -51,12 +51,33 @@ export async function initPlatform({api,status,escapeHtml}) {
     } catch (err) { $("reviewQueue").textContent = err.message; }
   });
 
+  async function watchAgentJob(jobId) {
+    for (let attempt=0; attempt<20; attempt++) {
+      await new Promise(resolve=>setTimeout(resolve,3000));
+      try {
+        const job=await api("/api/agents/jobs/"+encodeURIComponent(jobId));
+        if(job.status==="completed") {
+          let summary="Agent completed. Human approval is still required.";
+          try { const result=JSON.parse(job.result_json||"{}"); summary+=" "+(result.summary||""); }
+          catch {}
+          status("agentTaskStatus",summary,"good"); return;
+        }
+        if(job.status==="failed") {
+          let detail="Agent job failed.";
+          try { detail+=" "+(JSON.parse(job.result_json||"{}").error||""); } catch {}
+          status("agentTaskStatus",detail,"error"); return;
+        }
+      } catch(e) { status("agentTaskStatus","Job queued; status check unavailable: "+e.message); return; }
+    }
+    status("agentTaskStatus","Job is still queued or running. Check the job status again later.");
+  }
+
   $("runAgent").onclick = async () => {
     try {
       const result = await api("/api/agents/run",{method:"POST",body:JSON.stringify({
         agent_id:$("agentRole").value, task:$("agentTask").value.trim()
       })});
-      status("agentTaskStatus","Queued job "+result.job_id+". The worker must be running and Bedrock configured.","good");
+      status("agentTaskStatus","Queued job "+result.job_id+". Waiting for the worker…","good");watchAgentJob(result.job_id);
     } catch(e) { status("agentTaskStatus",e.message,"error"); }
   };
 
