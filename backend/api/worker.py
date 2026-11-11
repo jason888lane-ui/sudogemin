@@ -1,39 +1,131 @@
 """Long-running worker for Sudogemini ingestion and governed agent jobs."""
 from __future__ import annotations
-import json, logging, os, time
-import boto3
-from platform_engine import process_ingestion, run_agent, save_job_result
-logging.basicConfig(level=os.getenv("LOG_LEVEL","INFO"))
-log=logging.getLogger("sudogemini-worker")
 
-def handle(message: dict) -> None:
-    kind=message.get("kind")
-    if kind=="ingestion":
-        result=process_ingestion(message)
-        log.info("Ingestion validated dataset_id=%s sha256=%s",message.get("dataset_id"),result.get("sha256"))
+import json
+import logging
+import os
+import time
+import uuid
+
+import boto3
+from botocore.exceptions import ClientError
+from platform_engine import process_ingestion, run_agent, save_job_result
+
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+log = logging.getLogger("sudogemini-worker")
+LEASE_SECONDS = 55 * 60
+
+
+def _jobs_table():
+    name = os.getenv("AGENT_JOBS_TABLE", "")
+    if not name:
+        raise RuntimeError("AGENT_JOBS_TABLE is not configured")
+    return boto3.resource(
+        "dynamodb", region_name=os.getenv("AWS_REGION", "us-east-2")
+    ).Table(name)
+
+
+def claim_job(message: dict, now: int | None = None) -> str | None:
+    """Atomically claim a job; completed or actively leased duplicates are no-ops."""
+    now = int(time.time()) if now is None else int(now)
+    owner = str(uuid.uuid4())
+    try:
+        _jobs_table().update_item(
+            Key={"tenant_id": message["tenant_id"], "job_id": message["job_id"]},
+            UpdateExpression=(
+                "SET #status=:running, lease_owner=:owner, lease_expires_at=:expiry, "
+                "updated_at=:now ADD attempt_count :one"
+            ),
+            ConditionExpression=(
+                "attribute_not_exists(#status) OR #status IN (:queued,:failed) "
+                "OR (#status=:running AND lease_expires_at < :now)"
+            ),
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":running": "running", ":queued": "queued", ":failed": "failed",
+                ":owner": owner, ":expiry": now + LEASE_SECONDS, ":now": now, ":one": 1,
+            },
+        )
+        return owner
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return None
+        raise
+
+
+def complete_job(message: dict, owner: str) -> None:
+    """Complete only if this worker still owns the lease."""
+    _jobs_table().update_item(
+        Key={"tenant_id": message["tenant_id"], "job_id": message["job_id"]},
+        UpdateExpression=(
+            "SET #status=:completed, completed_at=:now "
+            "REMOVE lease_owner, lease_expires_at"
+        ),
+        ConditionExpression="lease_owner = :owner AND #status = :running",
+        ExpressionAttributeNames={"#status": "status"},
+        ExpressionAttributeValues={
+            ":completed": "completed", ":now": int(time.time()), ":owner": owner,
+            ":running": "running",
+        },
+    )
+
+
+def release_job(message: dict, owner: str, error: Exception) -> None:
+    """Release a failed attempt so SQS redelivery can claim it again."""
+    _jobs_table().update_item(
+        Key={"tenant_id": message["tenant_id"], "job_id": message["job_id"]},
+        UpdateExpression=(
+            "SET #status=:queued, last_error_type=:error, updated_at=:now "
+            "REMOVE lease_owner, lease_expires_at"
+        ),
+        ConditionExpression="lease_owner = :owner AND #status = :running",
+        ExpressionAttributeNames={"#status": "status"},
+        ExpressionAttributeValues={
+            ":queued": "queued", ":error": type(error).__name__,
+            ":now": int(time.time()), ":owner": owner, ":running": "running",
+        },
+    )
+
+
+def handle(message: dict, lease_owner: str) -> None:
+    kind = message.get("kind")
+    if kind == "ingestion":
+        result = process_ingestion(message)
+        log.info(
+            "Ingestion validated dataset_id=%s sha256=%s",
+            message.get("dataset_id"), result.get("sha256"),
+        )
+        complete_job(message, lease_owner)
         return
-    if kind=="agent":
-        try:
-            result=run_agent(message); save_job_result(message,result)
-        except Exception as exc:
-            save_job_result(message,{"error":type(exc).__name__},status="failed"); raise
+    if kind == "agent":
+        result = run_agent(message)
+        save_job_result(message, result, status="completed", lease_owner=lease_owner)
         return
     raise ValueError("Unsupported job kind")
 
+
 def mark_terminal_failure(message: dict, error: Exception) -> None:
-    """Persist a terminal job failure when SQS is about to move the message to its DLQ."""
-    kind=message.get("kind")
-    table_name=os.getenv("DATASETS_TABLE","")
-    if kind=="ingestion" and table_name:
-        table=boto3.resource("dynamodb",region_name=os.getenv("AWS_REGION","us-east-2")).Table(table_name)
+    """Persist terminal failure state when SQS is about to move a job to its DLQ."""
+    kind = message.get("kind")
+    table_name = os.getenv("DATASETS_TABLE", "")
+    if kind == "ingestion" and table_name:
+        table = boto3.resource(
+            "dynamodb", region_name=os.getenv("AWS_REGION", "us-east-2")
+        ).Table(table_name)
         table.update_item(
-            Key={"tenant_id":message["tenant_id"],"record_id":message["dataset_id"]},
-            UpdateExpression="SET ingestion_status=:failed, ingestion_error_type=:error, ingestion_failed_at=:at",
+            Key={"tenant_id": message["tenant_id"], "record_id": message["dataset_id"]},
+            UpdateExpression=(
+                "SET ingestion_status=:failed, ingestion_error_type=:error, "
+                "ingestion_failed_at=:at"
+            ),
             ConditionExpression="ingestion_job_id = :job",
-            ExpressionAttributeValues={":failed":"failed",":error":type(error).__name__,
-                                       ":at":int(time.time()),":job":message.get("job_id","")})
-    elif kind=="agent":
-        save_job_result(message,{"error":type(error).__name__},status="failed")
+            ExpressionAttributeValues={
+                ":failed": "failed", ":error": type(error).__name__,
+                ":at": int(time.time()), ":job": message.get("job_id", ""),
+            },
+        )
+    elif kind == "agent":
+        save_job_result(message, {"error": type(error).__name__}, status="failed")
 
 
 def decode_message(body: str) -> dict:
@@ -45,27 +137,49 @@ def decode_message(body: str) -> dict:
 
 
 def main() -> None:
-    queue_url=os.environ["PLATFORM_JOBS_QUEUE_URL"]
-    sqs=boto3.client("sqs",region_name=os.getenv("AWS_REGION","us-east-2"))
+    queue_url = os.environ["PLATFORM_JOBS_QUEUE_URL"]
+    sqs = boto3.client("sqs", region_name=os.getenv("AWS_REGION", "us-east-2"))
     while True:
-        response=sqs.receive_message(QueueUrl=queue_url,MaxNumberOfMessages=1,
-            WaitTimeSeconds=20,VisibilityTimeout=3600,AttributeNames=["ApproximateReceiveCount"])
-        for item in response.get("Messages",[]):
+        response = sqs.receive_message(
+            QueueUrl=queue_url, MaxNumberOfMessages=1, WaitTimeSeconds=20,
+            VisibilityTimeout=3600, AttributeNames=["ApproximateReceiveCount"],
+        )
+        for item in response.get("Messages", []):
             message = {}
+            owner = None
             try:
-                # Decode inside the per-message exception boundary. A poison message
-                # must be retried/DLQ'd by SQS, not terminate the worker process.
+                # A malformed body is isolated to this delivery and is retried/DLQ'd.
                 message = decode_message(item["Body"])
-                handle(message)
-                sqs.delete_message(QueueUrl=queue_url,ReceiptHandle=item["ReceiptHandle"])
+                owner = claim_job(message)
+                if owner is None:
+                    # Another delivery completed this job or currently owns its lease.
+                    # This receipt is a duplicate; the original delivery remains eligible
+                    # for retry if its worker crashes and the lease expires.
+                    sqs.delete_message(
+                        QueueUrl=queue_url, ReceiptHandle=item["ReceiptHandle"]
+                    )
+                    continue
+                handle(message, owner)
+                sqs.delete_message(
+                    QueueUrl=queue_url, ReceiptHandle=item["ReceiptHandle"]
+                )
             except Exception as exc:
                 log.exception("Job failed; message retained for retry/DLQ")
-                receive_count=int(item.get("Attributes",{}).get("ApproximateReceiveCount","1"))
-                if receive_count>=4 and message:
+                receive_count = int(
+                    item.get("Attributes", {}).get("ApproximateReceiveCount", "1")
+                )
+                if owner and message:
                     try:
-                        mark_terminal_failure(message,exc)
+                        release_job(message, owner, exc)
+                    except Exception:
+                        log.exception("Could not release failed job lease")
+                if receive_count >= 4 and message:
+                    try:
+                        mark_terminal_failure(message, exc)
                     except Exception:
                         log.exception("Could not persist terminal job failure")
         time.sleep(1)
 
-if __name__=="__main__": main()
+
+if __name__ == "__main__":
+    main()
