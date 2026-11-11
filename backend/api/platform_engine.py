@@ -47,10 +47,22 @@ def inspect_csv_or_json(data: bytes, content_type: str) -> dict:
     if len(data) > 100 * 1024 * 1024: raise ValueError("Upload exceeds the 100 MiB processing limit")
     text = data.decode("utf-8-sig")
     if content_type == "text/csv":
-        reader = csv.DictReader(io.StringIO(text)); columns = reader.fieldnames or []
-        if not columns: raise ValueError("CSV header row is required")
-        row_count = sum(1 for _ in reader)
-        if row_count < 1: raise ValueError("The uploaded dataset contains no records")
+        reader = csv.reader(io.StringIO(text), strict=True)
+        columns = next(reader, [])
+        if not columns or any(not str(column).strip() for column in columns):
+            raise ValueError("CSV header row must contain non-empty column names")
+        normalized_headers = [str(column).strip().lower() for column in columns]
+        if len(set(normalized_headers)) != len(normalized_headers):
+            raise ValueError("CSV column names must be unique")
+        row_count = 0
+        for row in reader:
+            if not row:
+                continue
+            if len(row) != len(columns):
+                raise ValueError("CSV records must have the same number of fields as the header")
+            row_count += 1
+        if row_count < 1:
+            raise ValueError("The uploaded dataset contains no records")
     elif content_type == "application/json":
         parsed = json.loads(text)
         records = [parsed] if isinstance(parsed, dict) else parsed if isinstance(parsed, list) else None
