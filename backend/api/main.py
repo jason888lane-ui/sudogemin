@@ -622,9 +622,11 @@ async def stripe_webhook(request: Request):
                             ExpressionAttributeNames={"#s":"status"},
                             ExpressionAttributeValues={":paid":"paid",":status":"paid_pending_fulfillment"})
             elif obj.get("mode") == "subscription" and tid:
-                _subscriptions.put_item(Item={"tenant_id":tid,"customer_id":obj.get("customer",""),
-                    "subscription_id":obj.get("subscription",""),"status":"checkout_completed_pending_webhook",
-                    "updated_at":int(time.time())})
+                _subscriptions.update_item(Key={"tenant_id":tid},
+                    UpdateExpression="SET customer_id=:c, subscription_id=:sid, #s=:status, updated_at=:t",
+                    ExpressionAttributeNames={"#s":"status"},
+                    ExpressionAttributeValues={":c":obj.get("customer",""),":sid":obj.get("subscription",""),
+                        ":status":"checkout_completed_pending_webhook",":t":int(time.time())})
         elif event_type == "account.updated":
             tid = metadata.get("tenant_id")
             if tid:
@@ -635,11 +637,14 @@ async def stripe_webhook(request: Request):
         elif event_type in ("customer.subscription.created","customer.subscription.updated","customer.subscription.deleted"):
             tid = metadata.get("tenant_id")
             if tid:
-                _subscriptions.put_item(Item={"tenant_id":tid,"customer_id":obj.get("customer",""),
-                    "subscription_id":obj.get("id",""),"status":obj.get("status","unknown"),
-                    "price_ids":[x.get("price",{}).get("id","") for x in obj.get("items",{}).get("data",[])],
-                    "current_period_end":obj.get("current_period_end",0),"cancel_at_period_end":bool(obj.get("cancel_at_period_end")),
-                    "updated_at":int(time.time())})
+                _subscriptions.update_item(Key={"tenant_id":tid},
+                    UpdateExpression="SET customer_id=:c, subscription_id=:sid, #s=:status, price_ids=:prices, current_period_end=:period, cancel_at_period_end=:cancel, updated_at=:t",
+                    ExpressionAttributeNames={"#s":"status"},
+                    ExpressionAttributeValues={":c":obj.get("customer",""),":sid":obj.get("id",""),
+                        ":status":obj.get("status","unknown"),
+                        ":prices":[x.get("price",{}).get("id","") for x in obj.get("items",{}).get("data",[])],
+                        ":period":obj.get("current_period_end",0),":cancel":bool(obj.get("cancel_at_period_end")),
+                        ":t":int(time.time())})
         elif event_type in ("charge.refunded","charge.dispute.created"):
             trade_id, tid = metadata.get("trade_id"), metadata.get("tenant_id")
             if trade_id and tid:
