@@ -593,16 +593,24 @@ async def stripe_webhook(request: Request):
     event_id = event["id"]
     try:
         _stripe_events.put_item(Item={"event_id":event_id,"status":"processing","created_at":int(time.time()),
-            "expires_at":int(time.time())+60*60*24*90},
+            "lease_until":int(time.time())+300,"expires_at":int(time.time())+60*60*24*90},
             ConditionExpression="attribute_not_exists(event_id)")
     except Exception:
         # Duplicate deliveries are acknowledged only when the event record already exists.
         existing = _stripe_events.get_item(Key={"event_id":event_id}).get("Item")
         if existing and existing.get("status") == "processed":
             return {"received":True,"duplicate":True,"event_type":event_type}
-        if existing:
-            raise HTTPException(status_code=503,detail="Stripe event is already being processed; retry shortly.")
-        raise HTTPException(status_code=503,detail="Stripe event idempotency store is unavailable.")
+        if existing and existing.get("status") == "processing":
+            now = int(time.time())
+            try:
+                _stripe_events.update_item(Key={"event_id":event_id},
+                    UpdateExpression="SET lease_until=:lease, created_at=:now",
+                    ConditionExpression="attribute_not_exists(lease_until) OR lease_until < :now",
+                    ExpressionAttributeValues={":lease":now+300,":now":now})
+            except Exception:
+                raise HTTPException(status_code=503,detail="Stripe event is already being processed; retry shortly.")
+        else:
+            raise HTTPException(status_code=503,detail="Stripe event idempotency store is unavailable.")
     try:
         metadata = obj.get("metadata") or {}
         if event_type == "checkout.session.completed":
