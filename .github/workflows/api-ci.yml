@@ -35,6 +35,12 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
           python -m pip install pytest httpx
+      - name: Diagnose public DNS delegation (non-blocking)
+        run: |
+          curl -fsS 'https://dns.google/resolve?name=sudogemini.com&type=NS' || true
+          echo
+          curl -fsS 'https://dns.google/resolve?name=app.sudogemini.com&type=CNAME' || true
+          echo
       - name: Compile application
         run: python -m compileall -q main.py personal_intelligence.py tests
       - name: Run API security and readiness tests
