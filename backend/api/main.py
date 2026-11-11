@@ -66,6 +66,20 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
 )
 
+@app.middleware("http")
+async def security_response_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if request.url.path.startswith("/api/") or request.url.path == "/":
+        response.headers["Cache-Control"] = "no-store"
+    if request.headers.get("x-forwarded-proto") == "https" or request.url.scheme == "https":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000"
+    return response
+
+
 AGENTS = [
     {"id": "ingestion", "name": "Ingestion Agent", "role": "Register approved sources and preserve provenance and license evidence"},
     {"id": "quality", "name": "Data Quality and Enrichment Agent", "role": "Normalize metadata and validate completeness, freshness, and schema consistency"},
