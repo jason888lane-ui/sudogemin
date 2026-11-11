@@ -505,16 +505,35 @@ class QuantumMatchIn(BaseModel):
     buyer_weights: list[float] = Field(min_length=1, max_length=16)
     dataset_weights: list[float] = Field(min_length=1, max_length=16)
 
+def stripe_configuration():
+    mode=os.getenv("STRIPE_MODE","test").strip().lower()
+    if mode=="test":
+        key=os.getenv("STRIPE_TEST_SECRET_KEY","")
+        enabled=os.getenv("STRIPE_TEST_ENABLED","false").lower()=="true"
+        price=os.getenv("STRIPE_TEST_PRICE_ID","")
+        webhook=os.getenv("STRIPE_TEST_WEBHOOK_SECRET","")
+        prefix="sk_test_"
+    elif mode=="live":
+        key=os.getenv("STRIPE_LIVE_SECRET_KEY","")
+        enabled=os.getenv("STRIPE_LIVE_ENABLED","false").lower()=="true"
+        price=os.getenv("STRIPE_PRICE_ID","")
+        webhook=os.getenv("STRIPE_LIVE_WEBHOOK_SECRET") or os.getenv("STRIPE_WEBHOOK_SECRET","")
+        prefix="sk_live_"
+    else:
+        return {"mode":"off","key":"","enabled":False,"price":"","webhook":""}
+    return {"mode":mode,"key":key,"enabled":enabled and bool(stripe) and key.startswith(prefix),
+            "price":price,"webhook":webhook}
+
+
 def stripe_status():
-    key = os.getenv("STRIPE_LIVE_SECRET_KEY", "")
-    enabled = os.getenv("STRIPE_LIVE_ENABLED", "false").lower() == "true"
-    ready = bool(stripe and enabled and key.startswith("sk_live_") and os.getenv("STRIPE_PRICE_ID"))
-    return {"status": "live_ready" if ready else "configuration_required",
-            "mode": "live" if key.startswith("sk_live_") else "off",
-            "checkout_enabled": ready,
-            "webhook_configured": bool(os.getenv("STRIPE_WEBHOOK_SECRET")),
-            "subscription_entitlements": bool(os.getenv("SUBSCRIPTIONS_TABLE")),
-            "idempotency_store": bool(os.getenv("STRIPE_EVENTS_TABLE"))}
+    config=stripe_configuration()
+    ready=config["enabled"] and bool(config["price"])
+    return {"status":config["mode"]+"_ready" if ready else "configuration_required",
+            "mode":config["mode"] if config["enabled"] else "off",
+            "checkout_enabled":ready,
+            "webhook_configured":bool(config["webhook"]),
+            "subscription_entitlements":bool(os.getenv("SUBSCRIPTIONS_TABLE")),
+            "idempotency_store":bool(os.getenv("STRIPE_EVENTS_TABLE"))}
 
 def quantum_status():
     enabled = os.getenv("CUDA_Q_ENABLED", "false").lower() == "true"
@@ -524,12 +543,11 @@ def quantum_status():
             "runtime": "CUDA-Q" if cudaq else "not_installed",
             "note": "qpp is a CPU simulator; NVIDIA GPU execution requires a CUDA-capable host."}
 
-def require_live_stripe():
-    key = os.getenv("STRIPE_LIVE_SECRET_KEY", "")
-    enabled = os.getenv("STRIPE_LIVE_ENABLED", "false").lower() == "true"
-    if not stripe or not enabled or not key.startswith("sk_live_"):
-        raise HTTPException(status_code=503, detail="Live Stripe is not configured.")
-    stripe.api_key = key
+def require_stripe():
+    config=stripe_configuration()
+    if not config["enabled"]:
+        raise HTTPException(status_code=503,detail="Stripe is disabled or its selected test/live credentials are invalid.")
+    stripe.api_key=config["key"]
     return stripe
 
 @app.get("/api/integrations/status")
@@ -539,8 +557,8 @@ def integrations_status():
 @app.post("/api/billing/checkout")
 def create_subscription_checkout(item: SubscriptionCheckoutIn, request: Request):
     tid = tenant(request)
-    sdk = require_live_stripe()
-    price_id = os.getenv("STRIPE_PRICE_ID")
+    sdk = require_stripe()
+    price_id = stripe_configuration()["price"]
     if not price_id:
         raise HTTPException(status_code=503, detail="STRIPE_PRICE_ID is missing.")
     base = os.getenv("APP_BASE_URL", "http://localhost:8000").rstrip("/")
@@ -558,7 +576,7 @@ def create_subscription_checkout(item: SubscriptionCheckoutIn, request: Request)
 def create_seller_onboarding(item: SellerOnboardingIn, request: Request):
     if os.getenv("STRIPE_CONNECT_ENABLED","false").lower() != "true":
         raise HTTPException(status_code=503,detail="Stripe Connect onboarding is not enabled.")
-    sdk=require_live_stripe()
+    sdk=require_stripe()
     tid=tenant(request)
     base=os.getenv("APP_BASE_URL","https://app.sudogemini.com").rstrip("/")
     try:
@@ -580,7 +598,7 @@ def create_seller_onboarding(item: SellerOnboardingIn, request: Request):
 
 @app.post("/api/trades/{trade_id}/checkout")
 def create_trade_checkout(trade_id: str, request: Request):
-    sdk = require_live_stripe()
+    sdk = require_stripe()
     tid = tenant(request)
     response = _trades.get_item(Key={"tenant_id": tid, "record_id": trade_id})
     trade = response.get("Item")
@@ -626,7 +644,7 @@ def create_trade_checkout(trade_id: str, request: Request):
 async def stripe_webhook(request: Request):
     if not stripe:
         raise HTTPException(status_code=503, detail="Stripe SDK is not installed")
-    secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+    secret = stripe_configuration()["webhook"]
     if not secret:
         raise HTTPException(status_code=503, detail="STRIPE_WEBHOOK_SECRET is not configured")
     payload = await request.body()
@@ -707,7 +725,7 @@ async def stripe_webhook(request: Request):
             if not (trade_id and tid):
                 payment_intent_id = obj.get("payment_intent")
                 if not payment_intent_id and obj.get("charge") and stripe:
-                    stripe.api_key = os.getenv("STRIPE_LIVE_SECRET_KEY", "")
+                    stripe.api_key = stripe_configuration()["key"]
                     charge = stripe.Charge.retrieve(obj.get("charge"))
                     payment_intent_id = charge.get("payment_intent")
                 if payment_intent_id and stripe:
