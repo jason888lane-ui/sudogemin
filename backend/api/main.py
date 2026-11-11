@@ -229,7 +229,7 @@ def enforce_paid_entitlement(request: Request) -> None:
         return
     tid = tenant(request)
     subscription = _subscriptions.get_item(Key={"tenant_id":tid}).get("Item")
-    if not subscription or subscription.get("status") not in {"active","trialing"}:
+    if not subscription or subscription.get("status") not in {"active","trialing"} or subscription.get("last_invoice_status") == "failed":
         raise HTTPException(status_code=402,detail="An active Sudogemini subscription is required for this operation.")
 
 def require_platform_admin(request: Request) -> None:
@@ -512,10 +512,14 @@ def create_trade_checkout(trade_id: str, request: Request):
     seller_tid = trade.get("seller_tenant_id")
     seller = _subscriptions.get_item(Key={"tenant_id":seller_tid}).get("Item") if seller_tid else None
     connected_account = (seller or {}).get("stripe_account_id")
-    if not connected_account or not seller.get("charges_enabled") or not seller.get("payouts_enabled"):
+    if not connected_account or not (seller or {}).get("charges_enabled") or not (seller or {}).get("payouts_enabled"):
         raise HTTPException(status_code=409,detail="Seller must complete Stripe Connect onboarding and enable charges and payouts before checkout.")
     amount_cents = int(round(float(trade["amount_usd"])*100))
-    fee_percent = float(os.getenv("MARKETPLACE_FEE_PERCENT","10"))
+    fee_raw = os.getenv("MARKETPLACE_FEE_PERCENT","").strip()
+    if not fee_raw:
+        raise HTTPException(status_code=503,detail="MARKETPLACE_FEE_PERCENT must be explicitly configured.")
+    try: fee_percent = float(fee_raw)
+    except ValueError: raise HTTPException(status_code=503,detail="Marketplace fee configuration is invalid.")
     if fee_percent < 0 or fee_percent > 30:
         raise HTTPException(status_code=503,detail="Marketplace fee configuration is invalid.")
     application_fee = int(round(amount_cents*fee_percent/100))
