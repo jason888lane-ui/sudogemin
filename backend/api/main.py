@@ -320,7 +320,9 @@ def update_agent_controls(item: AgentControlUpdateIn, request: Request):
     }
     _agent_jobs.put_item(Item=record)
     resumed = []
-    if current["paused"] and not paused:
+    was_blocked = current["paused"] or not current["ai_enabled"]
+    will_be_blocked = paused or not ai_enabled
+    if was_blocked and not will_be_blocked:
         query_args = {
             "KeyConditionExpression": Key("tenant_id").eq(tid),
             "FilterExpression": Attr("status").eq("paused"),
