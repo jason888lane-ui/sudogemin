@@ -14,7 +14,7 @@ COPY requirements.txt .
 RUN python -m pip install --upgrade pip \
     && python -m pip install --no-cache-dir -r requirements.txt
 
-COPY main.py personal_intelligence.py ./
+COPY main.py personal_intelligence.py platform_engine.py worker.py ./
 COPY static ./static
 
 RUN useradd --create-home --uid 10001 appuser \
