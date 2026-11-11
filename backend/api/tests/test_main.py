@@ -40,6 +40,21 @@ class ApiReadinessTests(unittest.TestCase):
         response = self.client.get("/api/datasets")
         self.assertEqual(response.status_code, 503)
 
+    def test_seller_approval_updates_buyer_and_seller_atomically(self):
+        from types import SimpleNamespace
+        main._trades.get_item.return_value = {"Item": {
+            "buyer_tenant_id": "buyer-tenant", "role": "seller",
+            "status": "pending_seller_approval"
+        }}
+        request = SimpleNamespace(state=SimpleNamespace(tenant_id="seller-tenant"))
+        main.seller_approve_trade("trade-1", request)
+        transaction = main._dynamodb.meta.client.transact_write_items.call_args.kwargs["TransactItems"]
+        self.assertEqual(len(transaction), 2)
+        self.assertEqual(transaction[0]["Update"]["Key"]["tenant_id"], {"S": "buyer-tenant"})
+        self.assertEqual(transaction[1]["Update"]["Key"]["tenant_id"], {"S": "seller-tenant"})
+        self.assertIn("ConditionExpression", transaction[0]["Update"])
+        self.assertIn("ConditionExpression", transaction[1]["Update"])
+
     def test_trade_requires_listing_and_explicit_license_acceptance(self):
         item = main.TradeIn(listing_id="listing-test")
         self.assertEqual(item.listing_id, "listing-test")
