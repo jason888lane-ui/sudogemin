@@ -225,6 +225,14 @@ Resources:
           Image: !Ref WorkerImageUri
           Essential: true
           Command: ["python", "worker.py"]
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - "python -c \"import pathlib,sys; sys.exit(0 if b'worker.py' in pathlib.Path('/proc/1/cmdline').read_bytes() else 1)\""
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 20
           Environment:
             - Name: AWS_REGION
               Value: !Ref AWS::Region
