@@ -7,6 +7,7 @@ from typing import Any, Literal
 from decimal import Decimal, ROUND_HALF_UP
 
 import boto3
+from botocore.exceptions import ClientError
 from boto3.dynamodb.conditions import Attr, Key
 from boto3.dynamodb.types import TypeSerializer
 import jwt
@@ -44,6 +45,7 @@ _datasets = _dynamodb.Table(DATASETS_TABLE)
 _trades = _dynamodb.Table(TRADES_TABLE)
 _marketplace = _dynamodb.Table(os.getenv("MARKETPLACE_TABLE", "sudogemini-staging-marketplace"))
 _agent_jobs = _dynamodb.Table(os.getenv("AGENT_JOBS_TABLE", "sudogemini-agent-jobs"))
+_tenant_memberships = _dynamodb.Table(os.getenv("TENANT_MEMBERSHIPS_TABLE", "sudogemini-tenant-memberships"))
 _subscriptions = _dynamodb.Table(os.getenv("SUBSCRIPTIONS_TABLE", "sudogemini-subscriptions"))
 _stripe_events = _dynamodb.Table(os.getenv("STRIPE_EVENTS_TABLE", "sudogemini-stripe-events"))
 _serializer = TypeSerializer()
@@ -126,11 +128,30 @@ class SubscriptionCheckoutIn(BaseModel):
 class SellerOnboardingIn(BaseModel):
     customer_email: str = Field(min_length=5, max_length=254)
 
+class TenantMembershipIn(BaseModel):
+    member_sub: str = Field(min_length=1, max_length=128)
+    tenant_id: str = Field(min_length=3, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]+$")
+
 def digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 def merkle_root(payload: str) -> str:
     return digest(f"{SEED}:{payload}")
+
+def resolve_tenant_id(subject: str) -> str:
+    """Resolve an authenticated subject through the server-controlled membership directory."""
+    table_name = os.getenv("TENANT_MEMBERSHIPS_TABLE", "").strip()
+    if not table_name:
+        return subject
+    membership = _tenant_memberships.get_item(
+        Key={"member_sub": subject}, ConsistentRead=True
+    ).get("Item")
+    if membership and membership.get("status") == "active":
+        tenant_id = membership.get("tenant_id")
+        if isinstance(tenant_id, str) and tenant_id.strip():
+            return tenant_id
+    return subject
+
 
 def tenant_id_from_claims(claims: dict) -> str:
     """Return the isolated tenant key for a verified Cognito ID token.
@@ -176,7 +197,8 @@ async def cognito_authentication(request: Request, call_next):
             # claims here: Cognito app-client write permissions and user-pool schema
             # mutability must be verified before any organization claim can authorize
             # access. Never accept tenant IDs from request bodies or query parameters.
-            tenant_id = tenant_id_from_claims(claims)
+            subject = tenant_id_from_claims(claims)
+            tenant_id = resolve_tenant_id(subject)
             request.state.tenant_id = tenant_id
             request.state.subject = claims["sub"]
         except Exception:
@@ -273,6 +295,54 @@ def enforce_paid_entitlement(request: Request) -> None:
     subscription = _subscriptions.get_item(Key={"tenant_id":tid}).get("Item")
     if not subscription or subscription.get("status") not in {"active","trialing"} or subscription.get("last_invoice_status") == "failed":
         raise HTTPException(status_code=402,detail="An active Sudogemini subscription is required for this operation.")
+
+@app.post("/api/admin/tenant-memberships", status_code=201)
+def create_tenant_membership(item: TenantMembershipIn, request: Request):
+    require_platform_admin(request)
+    if not os.getenv("TENANT_MEMBERSHIPS_TABLE", "").strip():
+        raise HTTPException(status_code=503, detail="Tenant membership directory is not configured")
+    record = {
+        "member_sub": item.member_sub,
+        "tenant_id": item.tenant_id,
+        "status": "active",
+        "created_by": getattr(request.state, "subject", ""),
+        "created_at": int(time.time()),
+    }
+    try:
+        _tenant_memberships.put_item(
+            Item=record, ConditionExpression="attribute_not_exists(member_sub)"
+        )
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code")
+        if code == "ConditionalCheckFailedException":
+            raise HTTPException(status_code=409, detail="A membership record already exists; revoke it before reassigning.")
+        raise HTTPException(status_code=503, detail="Tenant membership could not be saved.")
+    return {"member_sub": item.member_sub, "tenant_id": item.tenant_id, "status": "active"}
+
+
+@app.delete("/api/admin/tenant-memberships/{member_sub}")
+def revoke_tenant_membership(member_sub: str, request: Request):
+    require_platform_admin(request)
+    if not os.getenv("TENANT_MEMBERSHIPS_TABLE", "").strip():
+        raise HTTPException(status_code=503, detail="Tenant membership directory is not configured")
+    try:
+        _tenant_memberships.update_item(
+            Key={"member_sub": member_sub},
+            UpdateExpression="SET #status=:revoked, revoked_by=:actor, revoked_at=:at",
+            ConditionExpression="attribute_exists(member_sub) AND #status=:active",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":revoked": "revoked", ":active": "active",
+                ":actor": getattr(request.state, "subject", ""), ":at": int(time.time()),
+            },
+        )
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code")
+        if code == "ConditionalCheckFailedException":
+            raise HTTPException(status_code=404, detail="Active tenant membership not found.")
+        raise HTTPException(status_code=503, detail="Tenant membership could not be revoked.")
+    return {"member_sub": member_sub, "status": "revoked"}
+
 
 def require_platform_admin(request: Request) -> None:
     subject = getattr(request.state, "subject", "")
