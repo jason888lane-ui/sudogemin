@@ -6,7 +6,7 @@ import uuid
 from typing import Any, Literal
 
 import boto3
-from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.conditions import Attr, Key
 import jwt
 from jwt import PyJWKClient
 from fastapi import FastAPI, HTTPException, Request
@@ -238,21 +238,39 @@ def require_platform_admin(request: Request) -> None:
     if not subject or subject not in allowed:
         raise HTTPException(status_code=403, detail="Platform administrator approval is required.")
 
+@app.get("/api/datasets/review-queue")
+def dataset_review_queue(request: Request):
+    require_platform_admin(request)
+    try:
+        result = _datasets.scan(FilterExpression=Attr("license_status").eq("pending_review"), Limit=100)
+        return {"items": [{k:v for k,v in x.items() if k != "tenant_id"} for x in result.get("Items", [])],
+                "count": len(result.get("Items", []))}
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Dataset review queue unavailable: "+type(exc).__name__)
+
 @app.post("/api/datasets/{dataset_id}/approve")
 def approve_dataset(dataset_id: str, request: Request):
     require_platform_admin(request)
-    tid = tenant(request)
-    response = _datasets.get_item(Key={"tenant_id": tid, "record_id": dataset_id})
-    item = response.get("Item")
-    if not item:
-        raise HTTPException(status_code=404, detail="Dataset not found in this tenant.")
-    if not item.get("license_evidence_url") or not item.get("permitted_use"):
-        raise HTTPException(status_code=409, detail="License evidence URL and permitted-use statement are required.")
-    _datasets.update_item(Key={"tenant_id": tid, "record_id": dataset_id},
-        UpdateExpression="SET license_status=:approved, #s=:approved, approved_at=:at, approved_by=:actor",
-        ExpressionAttributeNames={"#s":"status"},
-        ExpressionAttributeValues={":approved":"approved",":at":int(time.time()),":actor":request.state.subject})
-    return {"dataset_id":dataset_id,"status":"approved","license_status":"approved"}
+    try:
+        result = _datasets.scan(FilterExpression=Attr("record_id").eq(dataset_id), Limit=100)
+        matches = result.get("Items", [])
+        item = next((x for x in matches if x.get("license_status") == "pending_review"), None)
+        if not item:
+            raise HTTPException(status_code=404, detail="Pending dataset not found.")
+        if not item.get("license_evidence_url") or not item.get("permitted_use"):
+            raise HTTPException(status_code=409, detail="License evidence URL and permitted-use statement are required.")
+        owner_tid = item["tenant_id"]
+        _datasets.update_item(Key={"tenant_id": owner_tid, "record_id": dataset_id},
+            UpdateExpression="SET license_status=:approved, #s=:approved, approved_at=:at, approved_by=:actor",
+            ExpressionAttributeNames={"#s":"status"},
+            ExpressionAttributeValues={":approved":"approved",":at":int(time.time()),":actor":request.state.subject},
+            ConditionExpression="license_status = :pending",
+            )
+        return {"dataset_id":dataset_id,"tenant_id":owner_tid,"status":"approved","license_status":"approved"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Dataset approval failed: "+type(exc).__name__)
 
 @app.post("/api/ingestion/{dataset_id}/upload-url")
 def ingestion_upload_url(dataset_id: str, item: UploadUrlIn, request: Request):
