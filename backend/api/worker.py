@@ -106,8 +106,10 @@ def handle(message: dict, lease_owner: str) -> None:
         modes = control.get("modes", {})
         mode = modes.get(message.get("agent_id"), "human_in_loop") if isinstance(modes, dict) else "human_in_loop"
         globally_paused = os.getenv("AI_GLOBAL_PAUSE", "false").lower() == "true"
-        if globally_paused or control.get("paused") or mode != "autonomous":
-            next_status = "paused" if (globally_paused or control.get("paused")) else "awaiting_approval"
+        ai_enabled = bool(control.get("ai_enabled", True))
+        human_approval_required = bool(control.get("human_approval_required", True))
+        if globally_paused or control.get("paused") or not ai_enabled or human_approval_required or mode != "autonomous":
+            next_status = "paused" if (globally_paused or control.get("paused") or not ai_enabled) else "awaiting_approval"
             table.update_item(
                 Key={"tenant_id": message["tenant_id"], "job_id": message["job_id"]},
                 UpdateExpression="SET #s=:next, updated_at=:now REMOVE lease_owner, lease_expires_at",
