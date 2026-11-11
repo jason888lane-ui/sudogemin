@@ -315,6 +315,23 @@ def update_agent_controls(item: AgentControlUpdateIn, request: Request):
     return {"controls": _read_autonomy_controls(tid)}
 
 
+@app.get("/api/agents/approvals")
+def list_agent_approvals(request: Request):
+    tid = tenant(request)
+    response = _agent_jobs.query(
+        KeyConditionExpression=Key("tenant_id").eq(tid),
+        FilterExpression=Attr("status").eq("awaiting_approval"),
+        Limit=100,
+    )
+    items = response.get("Items", [])
+    safe = []
+    for item in items:
+        item.pop("tenant_id", None)
+        if item.get("job_id") != _AUTONOMY_CONTROL_ID:
+            safe.append(item)
+    return {"items": safe}
+
+
 @app.post("/api/agents/jobs/{job_id}/approve", status_code=202)
 def approve_agent_job(job_id: str, request: Request):
     tid = tenant(request)
