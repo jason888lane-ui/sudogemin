@@ -96,7 +96,8 @@ def process_ingestion(message: dict) -> dict:
             ":count":result["record_count"],":schema":result["schema_sha256"],":at":_now(),
             ":ctype":content_type,":approved":"approved"})
     except Exception:
-        s3.delete_object(Bucket=bucket,Key=curated_key)
+        # Leave an unreferenced content-addressed object for lifecycle/orphan cleanup;
+        # the worker role intentionally cannot delete validated customer data.
         raise
     s3.delete_object(Bucket=bucket,Key=object_key)
     return {"dataset_id":dataset_id,"sha256":digest,**result,"status":"validated"}
