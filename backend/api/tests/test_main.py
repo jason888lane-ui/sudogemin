@@ -64,6 +64,26 @@ class ApiReadinessTests(unittest.TestCase):
         response = self.client.post("/api/billing/webhook", content=b"{}")
         self.assertEqual(response.status_code, 503)
 
+    def test_stripe_test_mode_never_accepts_live_secret_key(self):
+        with patch.dict(os.environ, {
+            "STRIPE_MODE": "test", "STRIPE_TEST_ENABLED": "true",
+            "STRIPE_TEST_SECRET_KEY": "sk_test_example", "STRIPE_TEST_PRICE_ID": "price_test"
+        }, clear=True):
+            config = main.stripe_configuration()
+            self.assertEqual(config["mode"], "test")
+            self.assertEqual(config["key"], "sk_test_example")
+            self.assertTrue(config["enabled"])
+
+    def test_stripe_live_mode_is_off_without_explicit_live_switch(self):
+        with patch.dict(os.environ, {
+            "STRIPE_MODE": "live", "STRIPE_LIVE_SECRET_KEY": "sk_live_example",
+            "STRIPE_LIVE_ENABLED": "false", "STRIPE_TEST_ENABLED": "true",
+            "STRIPE_TEST_SECRET_KEY": "sk_test_example"
+        }, clear=True):
+            config = main.stripe_configuration()
+            self.assertEqual(config["mode"], "live")
+            self.assertFalse(config["enabled"])
+
     def test_dynamodb_transaction_item_serialization_preserves_tenant_keys(self):
         encoded = main._ddb_item({"tenant_id": "tenant-a", "record_id": "order-1", "amount": main.Decimal("12.34")})
         self.assertEqual(encoded["tenant_id"], {"S": "tenant-a"})
