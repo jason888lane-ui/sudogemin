@@ -125,6 +125,8 @@ class AgentRunIn(BaseModel):
 
 class AgentControlUpdateIn(BaseModel):
     paused: bool | None = None
+    ai_enabled: bool | None = None
+    human_approval_required: bool | None = None
     modes: dict[str, Literal["autonomous", "human_in_loop"]] | None = None
 
 
@@ -269,6 +271,8 @@ def _read_autonomy_controls(tid: str) -> dict:
     return {
         "paused": bool(item.get("paused", False)) or global_pause,
         "global_pause": global_pause,
+        "ai_enabled": bool(item.get("ai_enabled", True)),
+        "human_approval_required": bool(item.get("human_approval_required", True)),
         "modes": modes,
         "updated_at": item.get("updated_at"),
         "updated_by": item.get("updated_by"),
@@ -279,12 +283,12 @@ def _read_autonomy_controls(tid: str) -> dict:
 def agents(request: Request):
     controls = _read_autonomy_controls(tenant(request))
     return {
-        "agents": [{**agent, "mode": controls["modes"][agent["id"]],
-                    "paused": controls["paused"]} for agent in AGENTS],
+        "agents": [{**agent, "mode": ("human_in_loop" if controls["human_approval_required"] else controls["modes"][agent["id"]]),
+                    "paused": controls["paused"], "enabled": controls["ai_enabled"]} for agent in AGENTS],
         "count": len(AGENTS),
         "mode": "tenant_configurable_governed_autonomy",
         "controls": controls,
-        "note": "Autonomous mode dispatches Bedrock planning and analysis jobs automatically; human-in-the-loop mode waits for tenant approval before dispatch. Current model agents return plans only and do not execute external business actions.",
+        "note": "AI can automatically run Bedrock analysis jobs when enabled and approval is switched off. When human approval is on, jobs wait for approval. The current model agents generate structured plans and recommendations; they do not yet execute external business actions.",
     }
 
 
@@ -303,11 +307,14 @@ def update_agent_controls(item: AgentControlUpdateIn, request: Request):
             raise HTTPException(status_code=422, detail="Unknown agent IDs: " + ", ".join(sorted(unknown)))
         current["modes"].update(item.modes)
     paused = current["paused"] if item.paused is None else item.paused
+    ai_enabled = current["ai_enabled"] if item.ai_enabled is None else item.ai_enabled
+    human_approval_required = current["human_approval_required"] if item.human_approval_required is None else item.human_approval_required
     if current["global_pause"]:
         paused = True
     record = {
         "tenant_id": tid, "job_id": _AUTONOMY_CONTROL_ID,
         "record_type": "autonomy_control", "paused": paused,
+        "ai_enabled": ai_enabled, "human_approval_required": human_approval_required,
         "modes": current["modes"], "updated_at": int(time.time()),
         "updated_by": getattr(request.state, "subject", ""),
     }
@@ -324,7 +331,7 @@ def update_agent_controls(item: AgentControlUpdateIn, request: Request):
             for job in page.get("Items", []):
                 agent_id = job.get("agent_id")
                 mode = current["modes"].get(agent_id, "human_in_loop")
-                next_status = "queued" if mode == "autonomous" else "awaiting_approval"
+                next_status = "queued" if (ai_enabled and not human_approval_required and mode == "autonomous") else ("paused" if not ai_enabled else "awaiting_approval")
                 try:
                     _agent_jobs.update_item(
                         Key={"tenant_id": tid, "job_id": job["job_id"]},
@@ -625,7 +632,11 @@ def run_agent(item: AgentRunIn, request: Request):
     controls = _read_autonomy_controls(tid)
     if controls["paused"]:
         raise HTTPException(status_code=423, detail="AI operations are paused.")
+    if not controls["ai_enabled"]:
+        raise HTTPException(status_code=423, detail="AI execution is switched off for this workspace.")
     mode = controls["modes"].get(item.agent_id, "human_in_loop")
+    if controls["human_approval_required"]:
+        mode = "human_in_loop"
     job_id = str(uuid.uuid4())
     status = "queued" if mode == "autonomous" else "awaiting_approval"
     record = {
