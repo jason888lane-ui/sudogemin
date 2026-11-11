@@ -240,5 +240,30 @@ class ApiReadinessTests(unittest.TestCase):
         self.assertEqual(item.license_status, "pending_review")
 
 
+    def test_autonomy_defaults_to_enabled_ai_with_human_approval(self):
+        with patch.object(main, "_agent_jobs") as table, \\
+             patch.dict(os.environ, {"AI_GLOBAL_PAUSE": "false"}):
+            table.get_item.return_value = {}
+            controls = main._read_autonomy_controls("tenant-a")
+        self.assertTrue(controls["ai_enabled"])
+        self.assertTrue(controls["human_approval_required"])
+        self.assertFalse(controls["paused"])
+        self.assertEqual(set(controls["modes"]), {
+            "ingestion", "quality", "scoping", "marketplace", "sales", "governance"
+        })
+
+    def test_agent_run_is_blocked_when_ai_master_switch_is_off(self):
+        from types import SimpleNamespace
+        request = SimpleNamespace(state=SimpleNamespace(tenant_id="tenant-a", subject="user-a"))
+        item = main.AgentRunIn(agent_id="quality", task="Review dataset schema")
+        with patch.object(main, "_read_autonomy_controls", return_value={
+            "paused": False, "global_pause": False, "ai_enabled": False,
+            "human_approval_required": False, "modes": {"quality": "autonomous"}
+        }):
+            with self.assertRaises(main.HTTPException) as caught:
+                main.run_agent(item, request)
+        self.assertEqual(caught.exception.status_code, 423)
+
+
 if __name__ == "__main__":
     unittest.main()
