@@ -38,11 +38,8 @@ export default {
       const now = new Date();
       const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
       const dateStamp = amzDate.slice(0, 8);
-      const canonicalUri = target.pathname.split("/").map(part => encodeRFC3986(decodeURIComponent(part))).join("/") || "/";
-      const canonicalQuery = [...target.searchParams.entries()]
-        .map(([k, v]) => [encodeRFC3986(k), encodeRFC3986(v)])
-        .sort((a, b) => a[0] === b[0] ? a[1].localeCompare(b[1]) : a[0].localeCompare(b[0]))
-        .map(([k, v]) => k + "=" + v).join("&");
+      const canonicalUri = canonicalRequestPath(target.pathname);
+      const canonicalQuery = canonicalQueryString(target.searchParams);
 
       const headers = new Headers(request.headers);
       headers.delete("host");
@@ -54,8 +51,14 @@ export default {
       headers.set("x-amz-content-sha256", payloadHash);
       headers.set("host", target.host);
 
-      const signedHeaderNames = ["host", "x-amz-content-sha256", "x-amz-date"];
-      const canonicalHeaders = signedHeaderNames.map(name => name + ":" + headers.get(name).trim().replace(/\s+/g, " ") + "\n").join("");
+      if (env.AWS_SESSION_TOKEN) {
+        headers.set("x-amz-security-token", env.AWS_SESSION_TOKEN);
+      }
+
+      const signedHeaderNames = [...new Set([...headers.keys()].map(name => name.toLowerCase()))]
+        .filter(name => ["host", "x-amz-content-sha256", "x-amz-date", "x-amz-security-token"].includes(name))
+        .sort();
+      const canonicalHeaders = signedHeaderNames.map(name => `${name}:${canonicalHeaderValue(headers.get(name))}\n`).join("");
       const signedHeaders = signedHeaderNames.join(";");
       const canonicalRequest = [method, canonicalUri, canonicalQuery, canonicalHeaders, signedHeaders, payloadHash].join("\n");
       const credentialScope = dateStamp + "/" + AWS_REGION + "/" + AWS_SERVICE + "/aws4_request";
@@ -63,7 +66,6 @@ export default {
       const signingKey = await getSigningKey(env.AWS_SECRET_ACCESS_KEY, dateStamp, AWS_REGION, AWS_SERVICE);
       const signature = await hmacHex(signingKey, stringToSign);
       headers.set("Authorization", "AWS4-HMAC-SHA256 Credential=" + env.AWS_ACCESS_KEY_ID + "/" + credentialScope + ", SignedHeaders=" + signedHeaders + ", Signature=" + signature);
-      headers.delete("host");
 
       const upstream = await fetch(target.toString(), {
         method,
@@ -90,6 +92,24 @@ function corsHeaders() {
     "Access-Control-Allow-Headers": "Content-Type, Authorization, Stripe-Signature",
     "Cache-Control": "no-store"
   };
+}
+
+function canonicalRequestPath(pathname) {
+  return "/" + pathname.split("/").slice(1).map(segment => encodeRFC3986(decodeURIComponent(segment))).join("/") || "/";
+}
+
+function canonicalQueryString(searchParams) {
+  const pairs = [];
+  for (const [key, value] of searchParams.entries()) {
+    pairs.push([encodeRFC3986(key), encodeRFC3986(value)]);
+  }
+  pairs.sort(([leftKey, leftValue], [rightKey, rightValue]) =>
+    leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue));
+  return pairs.map(([key, value]) => `${key}=${value}`).join("&");
+}
+
+function canonicalHeaderValue(value) {
+  return String(value || "").trim().replace(/\s+/g, " ");
 }
 
 function encodeRFC3986(value) {
