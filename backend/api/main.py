@@ -20,7 +20,7 @@ import boto3
 import jwt
 import stripe
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -1486,6 +1486,103 @@ def download_paid_dataset(
     record_audit(db, user["tenant_id"], user["subject"], "dataset.download_link_issued", "trade", trade_id, {"asset_count": len(downloads)})
     db.commit()
     return {"trade_id": trade_id, "downloads": downloads}
+
+
+
+def run_autonomous_discovery_worker():
+    import acquisition
+    return acquisition.run()
+
+
+@app.post("/internal/discovery/run", status_code=202)
+def queue_autonomous_discovery(
+    background_tasks: BackgroundTasks,
+    x_discovery_token: str | None = Header(default=None, alias="X-Discovery-Token"),
+):
+    expected = os.getenv("DISCOVERY_CRON_TOKEN", "")
+    if len(expected) < 32 or not x_discovery_token or not secrets.compare_digest(expected, x_discovery_token):
+        raise HTTPException(status_code=401, detail="Invalid discovery scheduler credentials.")
+    if os.getenv("TENANT_DISCOVERY_ENABLED", "false").lower() != "true":
+        return {"queued": False, "status": "disabled"}
+    background_tasks.add_task(run_autonomous_discovery_worker)
+    return {"queued": True, "status": "accepted"}
+
+
+@app.get("/api/admin/prospects")
+def list_acquisition_prospects(
+    status: str | None = Query(default=None, max_length=32),
+    limit: int = Query(default=100, ge=1, le=500),
+    _: dict[str, Any] = Depends(require_roles("platform_admin")),
+    db: Session = Depends(get_db),
+):
+    statement = select(Prospect).where(Prospect.suppressed.is_(False))
+    if status:
+        statement = statement.where(Prospect.status == status)
+    rows = db.scalars(statement.order_by(Prospect.fit_score.desc(), Prospect.updated_at.desc()).limit(limit)).all()
+    return {
+        "items": [{
+            "id": row.id, "company_name": row.company_name, "domain": row.domain,
+            "website": row.website, "industry": row.industry, "country": row.country,
+            "description": row.description, "buyer_fit_score": row.buyer_fit_score,
+            "seller_fit_score": row.seller_fit_score, "fit_score": row.fit_score,
+            "fit_reason": row.fit_reason, "source_url": row.source_url,
+            "source_title": row.source_title, "status": row.status,
+            "created_at": row.created_at, "updated_at": row.updated_at,
+        } for row in rows],
+        "count": len(rows),
+    }
+
+
+@app.post("/api/admin/prospects/{prospect_id}/dismiss")
+def dismiss_acquisition_prospect(
+    prospect_id: str,
+    user: dict[str, Any] = Depends(require_roles("platform_admin")),
+    db: Session = Depends(get_db),
+):
+    row = db.get(Prospect, prospect_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Prospect not found.")
+    row.status = "dismissed"
+    row.suppressed = True
+    row.updated_at = utc_now()
+    record_audit(db, "platform", user["subject"], "prospect.dismissed", "prospect", row.id)
+    db.commit()
+    return {"id": row.id, "status": row.status, "suppressed": row.suppressed}
+
+
+@app.post("/api/admin/prospects/{prospect_id}/approve-outreach")
+def approve_prospect_outreach(
+    prospect_id: str,
+    user: dict[str, Any] = Depends(require_roles("platform_admin")),
+    db: Session = Depends(get_db),
+):
+    row = db.get(Prospect, prospect_id)
+    if row is None or row.suppressed:
+        raise HTTPException(status_code=404, detail="Active prospect not found.")
+    row.status = "outreach_review"
+    row.updated_at = utc_now()
+    record_audit(db, "platform", user["subject"], "prospect.outreach_approved_for_draft", "prospect", row.id)
+    db.commit()
+    return {
+        "id": row.id,
+        "status": row.status,
+        "next_step": "Create a compliant, individually reviewed business introduction. No message has been sent.",
+    }
+
+
+@app.get("/api/admin/discovery/runs")
+def list_discovery_runs(
+    limit: int = Query(default=20, ge=1, le=100),
+    _: dict[str, Any] = Depends(require_roles("platform_admin")),
+    db: Session = Depends(get_db),
+):
+    rows = db.scalars(select(DiscoveryRun).order_by(DiscoveryRun.started_at.desc()).limit(limit)).all()
+    return {"items": [{
+        "id": row.id, "status": row.status, "queries_count": row.queries_count,
+        "sources_count": row.sources_count, "prospects_added": row.prospects_added,
+        "prospects_updated": row.prospects_updated, "error_summary": row.error_summary,
+        "started_at": row.started_at, "finished_at": row.finished_at,
+    } for row in rows]}
 
 
 @app.get("/api/audit")
