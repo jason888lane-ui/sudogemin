@@ -13,7 +13,7 @@ import jwt
 import stripe
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import JSON, ForeignKey, Index, Numeric, String, create_engine, func, or_, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -377,6 +377,12 @@ def home():
         "health": "/health",
         "readiness": "/ready",
     }
+
+
+@app.head("/")
+def head_home():
+    # Render's default HTTP probe uses HEAD on the root path.
+    return Response(status_code=200, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/health")
