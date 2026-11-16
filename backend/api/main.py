@@ -1110,6 +1110,65 @@ def stripe_is_enabled() -> bool:
     return True
 
 
+@app.post("/api/billing/connect/onboard")
+def connect_seller_payouts(
+    user: dict[str, Any] = Depends(require_roles("seller", "tenant_admin")),
+    db: Session = Depends(get_db),
+):
+    if not stripe_is_enabled():
+        raise HTTPException(status_code=503, detail="Stripe is not configured for this workspace.")
+    base = os.getenv("APP_BASE_URL", "").rstrip("/")
+    if not base.startswith("https://"):
+        raise HTTPException(status_code=503, detail="APP_BASE_URL must be configured with HTTPS.")
+    tenant = db.get(Tenant, user["tenant_id"])
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Company workspace not found.")
+    stripe.api_key = os.environ["STRIPE_SECRET_KEY"]
+    try:
+        if not tenant.stripe_account_id:
+            account = stripe.Account.create(
+                type="express",
+                country=tenant.country,
+                email=user.get("email") or None,
+                business_type="company",
+                capabilities={
+                    "card_payments": {"requested": True},
+                    "transfers": {"requested": True},
+                },
+                metadata={"tenant_id": tenant.id, "platform": APP_NAME},
+            )
+            tenant.stripe_account_id = account.id
+            tenant.stripe_charges_enabled = bool(account.charges_enabled)
+            tenant.stripe_payouts_enabled = bool(account.payouts_enabled)
+            db.commit()
+        link = stripe.AccountLink.create(
+            account=tenant.stripe_account_id,
+            refresh_url=base + "/portal?connect=refresh",
+            return_url=base + "/portal?connect=return",
+            type="account_onboarding",
+        )
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=502, detail="Stripe Connect onboarding could not be created. Check the Stripe account and supported country.") from None
+    return {"onboarding_url": link.url, "account_id": tenant.stripe_account_id}
+
+
+@app.get("/api/billing/connect/status")
+def connect_seller_status(
+    user: dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    tenant = db.get(Tenant, user["tenant_id"])
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Company workspace not found.")
+    return {
+        "connected": bool(tenant.stripe_account_id),
+        "charges_enabled": tenant.stripe_charges_enabled,
+        "payouts_enabled": tenant.stripe_payouts_enabled,
+        "ready_for_marketplace": bool(tenant.stripe_account_id and tenant.stripe_charges_enabled and tenant.stripe_payouts_enabled),
+    }
+
+
 @app.post("/api/trades/{trade_id}/checkout")
 def create_trade_checkout(
     trade_id: str,
@@ -1141,13 +1200,24 @@ def create_trade_checkout(
     base_url = os.getenv("APP_BASE_URL", "").rstrip("/")
     if not base_url.startswith("https://"):
         raise HTTPException(status_code=503, detail="APP_BASE_URL must be configured as the HTTPS customer return URL.")
-    if not os.getenv("STRIPE_SECRET_KEY"):
-        raise HTTPException(status_code=503, detail="Stripe secret key is missing.")
     dataset = db.get(Dataset, row.dataset_id)
-    if dataset is None:
-        raise HTTPException(status_code=409, detail="The dataset listing no longer exists.")
+    seller = db.get(Tenant, row.seller_tenant_id)
+    if dataset is None or seller is None:
+        raise HTTPException(status_code=409, detail="The listing or seller workspace no longer exists.")
+    if not seller.stripe_account_id or not seller.stripe_charges_enabled or not seller.stripe_payouts_enabled:
+        raise HTTPException(status_code=409, detail="The seller must finish Stripe Connect verification before buyers can pay.")
     stripe.api_key = os.environ["STRIPE_SECRET_KEY"]
     amount_cents = int((Decimal(row.amount_usd) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    fee_bps = int(os.getenv("PLATFORM_FEE_BPS", "1000"))
+    if fee_bps < 0 or fee_bps > 2500:
+        raise HTTPException(status_code=503, detail="PLATFORM_FEE_BPS must be between 0 and 2500.")
+    application_fee = (amount_cents * fee_bps) // 10000
+    payment_intent_data = {
+        "transfer_data": {"destination": seller.stripe_account_id},
+        "metadata": {"trade_id": row.id, "tenant_id": row.buyer_tenant_id, "seller_tenant_id": seller.id},
+    }
+    if application_fee:
+        payment_intent_data["application_fee_amount"] = application_fee
     try:
         session = stripe.checkout.Session.create(
             mode="payment",
@@ -1160,23 +1230,25 @@ def create_trade_checkout(
                 },
                 "quantity": 1,
             }],
-            success_url=base_url + "/billing/success?trade_id=" + row.id,
-            cancel_url=base_url + "/billing/cancel?trade_id=" + row.id,
+            payment_intent_data=payment_intent_data,
+            success_url=base_url + "/portal?payment=success&trade_id=" + row.id,
+            cancel_url=base_url + "/portal?payment=cancelled&trade_id=" + row.id,
             client_reference_id=row.id,
             metadata={
                 "trade_id": row.id,
                 "buyer_tenant_id": row.buyer_tenant_id,
+                "seller_tenant_id": row.seller_tenant_id,
                 "merkle_root": row.merkle_root,
             },
             idempotency_key="sudogemin-trade-" + row.id,
         )
     except Exception:
-        raise HTTPException(status_code=502, detail="Stripe could not create checkout. Review the Stripe account and configuration.") from None
+        raise HTTPException(status_code=502, detail="Stripe could not create Checkout. Review the Stripe Connect account and configuration.") from None
     row.stripe_session_id = session.id
     row.status = "checkout_created"
     row.payment_status = "checkout_created"
     row.updated_at = utc_now()
-    record_audit(db, user["tenant_id"], user["subject"], "trade.checkout_created", "trade", trade_id, {"stripe_session_id": session.id})
+    record_audit(db, user["tenant_id"], user["subject"], "trade.checkout_created", "trade", trade_id, {"stripe_session_id": session.id, "seller_connected_account": seller.stripe_account_id})
     db.commit()
     return {"checkout_url": session.url, "session_id": session.id, "trade_id": trade_id}
 
@@ -1202,6 +1274,17 @@ async def stripe_webhook(
     if existing is not None:
         return {"received": True, "duplicate": True}
 
+    if event_type == "account.updated":
+        account = event["data"]["object"]
+        tenant = db.scalar(select(Tenant).where(Tenant.stripe_account_id == account.get("id")))
+        if tenant:
+            tenant.stripe_charges_enabled = bool(account.get("charges_enabled"))
+            tenant.stripe_payouts_enabled = bool(account.get("payouts_enabled"))
+            record_audit(db, tenant.id, None, "seller.payout_account_updated", "tenant", tenant.id, {
+                "charges_enabled": tenant.stripe_charges_enabled,
+                "payouts_enabled": tenant.stripe_payouts_enabled,
+            })
+
     if event_type in {
         "checkout.session.completed",
         "checkout.session.async_payment_succeeded",
@@ -1217,11 +1300,12 @@ async def stripe_webhook(
         if (
             metadata.get("buyer_tenant_id") != row.buyer_tenant_id
             or metadata.get("merkle_root") != row.merkle_root
+            or metadata.get("seller_tenant_id") != row.seller_tenant_id
             or obj.get("id") != row.stripe_session_id
         ):
             raise HTTPException(status_code=400, detail="Webhook metadata does not match the recorded trade.")
         expected_cents = int((Decimal(row.amount_usd) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
-        if obj.get("amount_total") is not None and int(obj["amount_total"]) != expected_cents:
+        if obj.get("amount_total") is None or int(obj["amount_total"]) != expected_cents:
             raise HTTPException(status_code=400, detail="Webhook amount does not match the approved trade amount.")
         if obj.get("currency") and obj["currency"].lower() != row.currency:
             raise HTTPException(status_code=400, detail="Webhook currency does not match the approved trade.")
@@ -1230,6 +1314,7 @@ async def stripe_webhook(
                 raise HTTPException(status_code=409, detail="Checkout is not marked paid by Stripe.")
             row.payment_status = "paid"
             row.status = "paid"
+            row.stripe_payment_intent_id = str(obj.get("payment_intent") or "") or None
             row.updated_at = utc_now()
             record_audit(db, row.buyer_tenant_id, None, "trade.payment_confirmed", "trade", row.id, {"stripe_event_id": event_id})
         elif event_type == "checkout.session.async_payment_failed":
@@ -1252,6 +1337,155 @@ async def stripe_webhook(
             return {"received": True, "duplicate": True}
         raise HTTPException(status_code=409, detail="Webhook event could not be committed safely.") from None
     return {"received": True, "event_type": event_type}
+
+
+
+def object_storage_client():
+    bucket = os.getenv("DATA_STORAGE_BUCKET", "").strip()
+    region = os.getenv("DATA_STORAGE_REGION", os.getenv("AWS_REGION", "us-east-2")).strip()
+    if not bucket:
+        raise HTTPException(status_code=503, detail="Secure file storage is not configured.")
+    try:
+        return boto3.client("s3", region_name=region), bucket
+    except Exception:
+        raise HTTPException(status_code=503, detail="Secure file storage is unavailable.") from None
+
+
+@app.post("/api/datasets/{dataset_id}/assets/presign", status_code=201)
+def create_asset_upload(
+    dataset_id: str,
+    item: AssetUploadIn,
+    user: dict[str, Any] = Depends(require_roles("seller", "tenant_admin")),
+    db: Session = Depends(get_db),
+):
+    dataset = db.scalar(select(Dataset).where(
+        Dataset.id == dataset_id,
+        Dataset.tenant_id == user["tenant_id"],
+    ))
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found.")
+    if dataset.status != "pending_review":
+        raise HTTPException(status_code=409, detail="Files may only be added before listing review.")
+    filename = Path(item.filename).name
+    suffix = Path(filename).suffix.lower()
+    allowed_types = {
+        ".csv": {"text/csv", "application/csv", "application/vnd.ms-excel"},
+        ".json": {"application/json", "text/json"},
+        ".parquet": {"application/vnd.apache.parquet", "application/octet-stream"},
+        ".zip": {"application/zip", "application/x-zip-compressed"},
+        ".xlsx": {"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+    }
+    if suffix not in allowed_types or item.content_type.lower() not in allowed_types[suffix]:
+        raise HTTPException(status_code=415, detail="Supported files are CSV, JSON, Parquet, ZIP, and XLSX with matching content types.")
+    s3, bucket = object_storage_client()
+    asset_id = str(uuid.uuid4())
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", filename)[:180]
+    object_key = f"{user['tenant_id']}/{dataset_id}/{asset_id}/{safe_name}"
+    checksum_b64 = base64.b64encode(bytes.fromhex(item.checksum_sha256)).decode("ascii")
+    try:
+        upload_url = s3.generate_presigned_url(
+            "put_object",
+            Params={
+                "Bucket": bucket,
+                "Key": object_key,
+                "ContentType": item.content_type,
+                "ChecksumSHA256": checksum_b64,
+                "ServerSideEncryption": "AES256",
+            },
+            ExpiresIn=600,
+        )
+    except (BotoCoreError, ClientError):
+        raise HTTPException(status_code=502, detail="Could not create a secure upload link.") from None
+    row = DataAsset(
+        id=asset_id,
+        tenant_id=user["tenant_id"],
+        dataset_id=dataset_id,
+        uploader_subject=user["subject"],
+        object_key=object_key,
+        filename=filename,
+        content_type=item.content_type,
+        size_bytes=item.size_bytes,
+        checksum_sha256=item.checksum_sha256.lower(),
+        status="pending_upload",
+        created_at=utc_now(),
+    )
+    db.add(row)
+    db.commit()
+    return {
+        "asset_id": asset_id,
+        "upload_url": upload_url,
+        "method": "PUT",
+        "headers": {"Content-Type": item.content_type, "x-amz-checksum-sha256": checksum_b64, "x-amz-server-side-encryption": "AES256"},
+        "expires_in": 600,
+    }
+
+
+@app.post("/api/assets/{asset_id}/complete")
+def complete_asset_upload(
+    asset_id: str,
+    user: dict[str, Any] = Depends(require_roles("seller", "tenant_admin")),
+    db: Session = Depends(get_db),
+):
+    asset = db.scalar(select(DataAsset).where(
+        DataAsset.id == asset_id,
+        DataAsset.tenant_id == user["tenant_id"],
+        DataAsset.uploader_subject == user["subject"],
+        DataAsset.status == "pending_upload",
+    ))
+    if asset is None:
+        raise HTTPException(status_code=404, detail="Pending upload not found.")
+    s3, bucket = object_storage_client()
+    try:
+        stored = s3.head_object(Bucket=bucket, Key=asset.object_key, ChecksumMode="ENABLED")
+    except (BotoCoreError, ClientError):
+        raise HTTPException(status_code=409, detail="The uploaded object could not be verified.") from None
+    expected_b64 = base64.b64encode(bytes.fromhex(asset.checksum_sha256)).decode("ascii")
+    if int(stored.get("ContentLength", -1)) != asset.size_bytes or stored.get("ChecksumSHA256") != expected_b64:
+        raise HTTPException(status_code=422, detail="Uploaded size or SHA-256 checksum does not match the upload declaration.")
+    asset.status = "uploaded"
+    record_audit(db, user["tenant_id"], user["subject"], "dataset.asset_uploaded", "data_asset", asset.id, {
+        "dataset_id": asset.dataset_id, "size_bytes": asset.size_bytes, "checksum_sha256": asset.checksum_sha256,
+    })
+    db.commit()
+    return {"asset_id": asset.id, "status": asset.status, "checksum_sha256": asset.checksum_sha256}
+
+
+@app.get("/api/trades/{trade_id}/download")
+def download_paid_dataset(
+    trade_id: str,
+    user: dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    trade = db.scalar(select(Trade).where(
+        Trade.id == trade_id,
+        Trade.buyer_tenant_id == user["tenant_id"],
+        Trade.status == "paid",
+        Trade.payment_status == "paid",
+    ))
+    if trade is None:
+        raise HTTPException(status_code=404, detail="A paid purchase for this dataset was not found.")
+    assets = db.scalars(select(DataAsset).where(
+        DataAsset.dataset_id == trade.dataset_id,
+        DataAsset.tenant_id == trade.seller_tenant_id,
+        DataAsset.status == "uploaded",
+    )).all()
+    if not assets:
+        raise HTTPException(status_code=404, detail="The seller has not uploaded a deliverable file yet.")
+    s3, bucket = object_storage_client()
+    downloads = []
+    for asset in assets:
+        try:
+            url = s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": bucket, "Key": asset.object_key, "ResponseContentDisposition": f'attachment; filename="{asset.filename}"'},
+                ExpiresIn=300,
+            )
+        except (BotoCoreError, ClientError):
+            raise HTTPException(status_code=502, detail="Secure dataset delivery could not be created.") from None
+        downloads.append({"filename": asset.filename, "size_bytes": asset.size_bytes, "checksum_sha256": asset.checksum_sha256, "download_url": url, "expires_in": 300})
+    record_audit(db, user["tenant_id"], user["subject"], "dataset.download_link_issued", "trade", trade_id, {"asset_count": len(downloads)})
+    db.commit()
+    return {"trade_id": trade_id, "downloads": downloads}
 
 
 @app.get("/api/audit")
