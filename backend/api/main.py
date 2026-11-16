@@ -13,6 +13,7 @@ import jwt
 import stripe
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import JSON, ForeignKey, Index, Numeric, String, create_engine, func, or_, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -391,7 +392,8 @@ def readiness():
     else:
         checks["database_reachable"] = False
     ready = all(checks.values())
-    return {"status": "ready" if ready else "degraded", "checks": checks}
+    payload = {"status": "ready" if ready else "degraded", "checks": checks}
+    return JSONResponse(status_code=200 if ready else 503, content=payload)
 
 
 @app.get("/api/agents")
@@ -667,6 +669,17 @@ def create_trade_checkout(
     ))
     if row is None:
         raise HTTPException(status_code=404, detail="Trade not found.")
+    if row.status == "checkout_created" and row.stripe_session_id:
+        if not stripe_is_enabled():
+            raise HTTPException(status_code=503, detail="Stripe payments are disabled or not fully configured.")
+        stripe.api_key = os.environ["STRIPE_SECRET_KEY"]
+        try:
+            existing_session = stripe.checkout.Session.retrieve(row.stripe_session_id)
+        except stripe.error.StripeError:
+            raise HTTPException(status_code=502, detail="The existing Stripe Checkout session could not be retrieved.") from None
+        if existing_session.status == "open":
+            return {"checkout_url": existing_session.url, "session_id": existing_session.id, "trade_id": trade_id}
+        raise HTTPException(status_code=409, detail="This Checkout session is no longer open. Contact support before retrying payment.")
     if row.status != "approved_pending_payment":
         raise HTTPException(status_code=409, detail="An independently approved trade is required before checkout.")
     if not stripe_is_enabled():
