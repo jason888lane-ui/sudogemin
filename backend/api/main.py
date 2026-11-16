@@ -1,27 +1,35 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import mimetypes
 import os
+import re
+import secrets
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
+from pathlib import Path
 from typing import Any, Callable
 
+import boto3
 import jwt
 import stripe
+from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import JSON, ForeignKey, Index, Numeric, String, create_engine, func, or_, select, text
+from sqlalchemy import JSON, Boolean, ForeignKey, Index, Numeric, String, UniqueConstraint, create_engine, func, or_, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from jwt import PyJWKClient
 
 APP_NAME = "Sudogemin"
-APP_VERSION = "2.0.0"
+APP_VERSION = "3.0.0"
 APP_ENV = os.getenv("APP_ENV", "production").strip().lower()
 DOCS_ENABLED = os.getenv("ENABLE_API_DOCS", "false" if APP_ENV == "production" else "true").lower() == "true"
 
@@ -66,6 +74,8 @@ class Dataset(Base):
     category: Mapped[str] = mapped_column(String(80), nullable=False, default="general")
     source: Mapped[str] = mapped_column(String(200), nullable=False, default="user-submitted")
     record_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    price_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    reviewer_subject: Mapped[str | None] = mapped_column(String(200), nullable=True)
     license_status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending_review")
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending_review")
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -87,6 +97,7 @@ class Trade(Base):
     approved_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
     merkle_root: Mapped[str] = mapped_column(String(64), nullable=False)
     stripe_session_id: Mapped[str | None] = mapped_column(String(200), unique=True, nullable=True)
+    stripe_payment_intent_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[str] = mapped_column(String(40), nullable=False)
     updated_at: Mapped[str] = mapped_column(String(40), nullable=False)
 
@@ -110,9 +121,64 @@ class StripeEvent(Base):
     received_at: Mapped[str] = mapped_column(String(40), nullable=False)
 
 
+class Tenant(Base):
+    __tablename__ = "tenants"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    slug: Mapped[str] = mapped_column(String(100), unique=True, index=True, nullable=False)
+    country: Mapped[str] = mapped_column(String(2), nullable=False, default="US")
+    website: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_by_subject: Mapped[str] = mapped_column(String(200), nullable=False)
+    stripe_account_id: Mapped[str | None] = mapped_column(String(100), unique=True, nullable=True)
+    stripe_charges_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    stripe_payouts_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[str] = mapped_column(String(40), nullable=False)
+
+
+class TenantMembership(Base):
+    __tablename__ = "tenant_memberships"
+    __table_args__ = (UniqueConstraint("tenant_id", "subject", name="uq_tenant_membership_subject"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True, nullable=False)
+    subject: Mapped[str] = mapped_column(String(200), index=True, nullable=False)
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    roles: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="active")
+    created_at: Mapped[str] = mapped_column(String(40), nullable=False)
+
+
+class OrganizationInvite(Base):
+    __tablename__ = "organization_invites"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True, nullable=False)
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    roles: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    created_by_subject: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_at: Mapped[str] = mapped_column(String(40), nullable=False)
+    expires_at: Mapped[str] = mapped_column(String(40), nullable=False)
+    accepted_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
+class DataAsset(Base):
+    __tablename__ = "data_assets"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(160), index=True, nullable=False)
+    dataset_id: Mapped[str] = mapped_column(ForeignKey("datasets.id"), index=True, nullable=False)
+    uploader_subject: Mapped[str] = mapped_column(String(200), nullable=False)
+    object_key: Mapped[str] = mapped_column(String(1024), unique=True, nullable=False)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(nullable=False)
+    checksum_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending_upload")
+    created_at: Mapped[str] = mapped_column(String(40), nullable=False)
+
+
 Index("ix_datasets_marketplace", Dataset.status, Dataset.license_status)
 Index("ix_trades_buyer_status", Trade.buyer_tenant_id, Trade.status)
 Index("ix_trades_seller_status", Trade.seller_tenant_id, Trade.status)
+Index("ix_data_assets_dataset_status", DataAsset.dataset_id, DataAsset.status)
 
 
 DB_URL = _database_url()
@@ -143,9 +209,15 @@ def identity_configured() -> bool:
     return all(os.getenv(key) for key in ("OIDC_ISSUER", "OIDC_AUDIENCE", "OIDC_JWKS_URL"))
 
 
-def get_current_user(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+def oidc_login_configured() -> bool:
+    return identity_configured() and all(
+        os.getenv(key) for key in ("OIDC_CLIENT_ID", "OIDC_AUTHORIZATION_URL", "OIDC_TOKEN_URL")
+    )
+
+
+def decode_identity_token(authorization: str | None) -> dict[str, Any]:
     if not identity_configured():
-        raise HTTPException(status_code=503, detail="Identity provider is not configured. Set OIDC_ISSUER, OIDC_AUDIENCE, and OIDC_JWKS_URL.")
+        raise HTTPException(status_code=503, detail="Identity provider is not configured.")
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="A valid bearer access token is required.")
     token = authorization[7:].strip()
@@ -168,28 +240,79 @@ def get_current_user(authorization: str | None = Header(default=None)) -> dict[s
         )
         expected_audience = os.environ["OIDC_AUDIENCE"]
         token_audience = claims.get("aud")
-        if token_audience:
-            audience_values = token_audience if isinstance(token_audience, list) else [token_audience]
-            if expected_audience not in audience_values:
-                raise HTTPException(status_code=401, detail="Access token audience is invalid.")
-        elif claims.get("client_id") != expected_audience:
-            # Cognito access tokens use client_id; standard OIDC tokens normally use aud.
+        audience_values = token_audience if isinstance(token_audience, list) else [token_audience]
+        if expected_audience not in audience_values and claims.get("client_id") != expected_audience:
             raise HTTPException(status_code=401, detail="Access token audience is invalid.")
-        tenant_id = claims.get("tenant_id") or claims.get("custom:tenant_id")
-        subject = claims.get("sub")
-        if not tenant_id or not subject:
-            raise HTTPException(status_code=401, detail="The identity token is missing required tenant claims.")
-        roles = claims.get("roles", claims.get("groups", claims.get("cognito:groups", [])))
-        if isinstance(roles, str):
-            roles = [roles]
-        if not isinstance(roles, list):
-            roles = []
-        return {"subject": str(subject), "tenant_id": str(tenant_id), "roles": [str(role) for role in roles]}
+        return claims
     except HTTPException:
         raise
     except Exception:
         raise HTTPException(status_code=401, detail="Access token validation failed.") from None
 
+
+def _verified_email(claims: dict[str, Any]) -> str:
+    email = str(claims.get("email") or "").strip().lower()
+    verified = claims.get("email_verified") is True or str(claims.get("email_verified", "")).lower() == "true"
+    if not email or not verified:
+        raise HTTPException(status_code=403, detail="Your identity provider must return a verified email address.")
+    return email
+
+
+def get_current_identity(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    claims = decode_identity_token(authorization)
+    return {
+        "subject": str(claims["sub"]),
+        "email": str(claims.get("email") or "").strip().lower(),
+        "email_verified": claims.get("email_verified") is True or str(claims.get("email_verified", "")).lower() == "true",
+        "name": str(claims.get("name") or claims.get("given_name") or ""),
+        "claims": claims,
+    }
+
+
+def get_current_user(
+    authorization: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    claims = decode_identity_token(authorization)
+    subject = str(claims["sub"])
+    email = str(claims.get("email") or "").strip().lower()
+    legacy_tenant = claims.get("tenant_id") or claims.get("custom:tenant_id")
+
+    if legacy_tenant:
+        tenant_id = str(legacy_tenant)
+        membership = db.scalar(select(TenantMembership).where(
+            TenantMembership.tenant_id == tenant_id,
+            TenantMembership.subject == subject,
+            TenantMembership.status == "active",
+        ))
+        if membership:
+            roles = list(membership.roles or [])
+            email = membership.email
+        else:
+            raw_roles = claims.get("roles", claims.get("groups", claims.get("cognito:groups", [])))
+            roles = [raw_roles] if isinstance(raw_roles, str) else (raw_roles if isinstance(raw_roles, list) else [])
+            roles = [str(role) for role in roles]
+        return {"subject": subject, "tenant_id": tenant_id, "roles": roles, "email": email}
+
+    statement = select(TenantMembership).where(
+        TenantMembership.subject == subject,
+        TenantMembership.status == "active",
+    )
+    if x_tenant_id:
+        statement = statement.where(TenantMembership.tenant_id == x_tenant_id)
+    memberships = db.scalars(statement.order_by(TenantMembership.created_at.asc())).all()
+    if not memberships:
+        raise HTTPException(status_code=403, detail="No company workspace is linked to this account. Create a company or accept an invitation.")
+    if len(memberships) > 1 and not x_tenant_id:
+        raise HTTPException(status_code=409, detail="Select a company workspace using the X-Tenant-ID header.")
+    membership = memberships[0]
+    return {
+        "subject": subject,
+        "tenant_id": membership.tenant_id,
+        "roles": list(membership.roles or []),
+        "email": membership.email,
+    }
 
 def require_roles(*allowed_roles: str) -> Callable[..., dict[str, Any]]:
     def dependency(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
