@@ -13,6 +13,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlencode
+from urllib.request import Request as UrlRequest, urlopen
 
 import boto3
 import jwt
@@ -175,10 +177,46 @@ class DataAsset(Base):
     created_at: Mapped[str] = mapped_column(String(40), nullable=False)
 
 
+class Prospect(Base):
+    __tablename__ = "prospects"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    company_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    domain: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
+    website: Mapped[str] = mapped_column(String(512), nullable=False)
+    industry: Mapped[str] = mapped_column(String(120), nullable=False, default="unknown")
+    country: Mapped[str] = mapped_column(String(2), nullable=False, default="US")
+    description: Mapped[str] = mapped_column(String(2000), nullable=False, default="")
+    buyer_fit_score: Mapped[int] = mapped_column(nullable=False, default=0)
+    seller_fit_score: Mapped[int] = mapped_column(nullable=False, default=0)
+    fit_score: Mapped[int] = mapped_column(nullable=False, default=0)
+    fit_reason: Mapped[str] = mapped_column(String(1000), nullable=False, default="")
+    source_url: Mapped[str] = mapped_column(String(1024), nullable=False)
+    source_title: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    source_evidence: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="discovered")
+    suppressed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[str] = mapped_column(String(40), nullable=False)
+    updated_at: Mapped[str] = mapped_column(String(40), nullable=False)
+
+
+class DiscoveryRun(Base):
+    __tablename__ = "discovery_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    queries_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    sources_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    prospects_added: Mapped[int] = mapped_column(nullable=False, default=0)
+    prospects_updated: Mapped[int] = mapped_column(nullable=False, default=0)
+    error_summary: Mapped[str] = mapped_column(String(2000), nullable=False, default="")
+    started_at: Mapped[str] = mapped_column(String(40), nullable=False)
+    finished_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
 Index("ix_datasets_marketplace", Dataset.status, Dataset.license_status)
 Index("ix_trades_buyer_status", Trade.buyer_tenant_id, Trade.status)
 Index("ix_trades_seller_status", Trade.seller_tenant_id, Trade.status)
 Index("ix_data_assets_dataset_status", DataAsset.dataset_id, DataAsset.status)
+Index("ix_prospects_score_status", Prospect.fit_score, Prospect.status)
 
 
 DB_URL = _database_url()
@@ -371,7 +409,7 @@ def record_audit(
 
 
 def dataset_content_hash(item: dict[str, Any]) -> str:
-    stable = {key: item.get(key) for key in ("name", "description", "category", "source", "record_count")}
+    stable = {key: item.get(key) for key in ("name", "description", "category", "source", "record_count", "price_usd")}
     return sha256_hex(_canonical_json(stable).encode("utf-8"))
 
 
@@ -396,6 +434,7 @@ def serialize_dataset(row: Dataset) -> dict[str, Any]:
         "category": row.category,
         "source": row.source,
         "record_count": row.record_count,
+        "price_usd": format(Decimal(row.price_usd), "f") if row.price_usd is not None else None,
         "license_status": row.license_status,
         "status": row.status,
         "content_hash": row.content_hash,
@@ -427,6 +466,41 @@ class DatasetIn(BaseModel):
     category: str = Field(default="general", min_length=1, max_length=80)
     source: str = Field(default="user-submitted", min_length=1, max_length=200)
     record_count: int = Field(default=0, ge=0, le=2_000_000_000)
+    price_usd: Decimal = Field(gt=0, le=1_000_000, max_digits=12, decimal_places=2)
+
+
+class OrganizationIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=2, max_length=160)
+    country: str = Field(default="US", min_length=2, max_length=2, pattern="^[A-Za-z]{2}$")
+    website: str | None = Field(default=None, max_length=255)
+
+
+class InvitationIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    email: str = Field(min_length=5, max_length=255)
+    roles: list[str] = Field(min_length=1, max_length=6)
+
+
+class InvitationAcceptIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    token: str = Field(min_length=32, max_length=256)
+
+
+class AssetUploadIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    filename: str = Field(min_length=1, max_length=255)
+    content_type: str = Field(min_length=3, max_length=120)
+    size_bytes: int = Field(gt=0, le=1_073_741_824)
+    checksum_sha256: str = Field(pattern="^[a-fA-F0-9]{64}$")
+
+
+class AuthTokenIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    code: str = Field(min_length=10, max_length=4096)
+    code_verifier: str = Field(min_length=43, max_length=128)
+    nonce: str = Field(min_length=16, max_length=256)
+    redirect_uri: str = Field(min_length=10, max_length=512)
 
 
 class DatasetReviewIn(BaseModel):
@@ -443,7 +517,6 @@ class MatchIn(BaseModel):
 class TradeIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     dataset_id: str = Field(min_length=36, max_length=36)
-    amount_usd: Decimal = Field(gt=0, le=1_000_000, max_digits=12, decimal_places=2)
 
 
 app = FastAPI(
@@ -454,6 +527,11 @@ app = FastAPI(
     redoc_url="/redoc" if DOCS_ENABLED else None,
     openapi_url="/openapi.json" if DOCS_ENABLED else None,
 )
+
+
+STATIC_DIR = Path(__file__).parent / "static"
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 if os.getenv("CORS_ALLOW_ORIGINS"):
@@ -475,6 +553,7 @@ async def security_headers(request: Request, call_next):
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
     response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    response.headers.setdefault("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self' https:")
     if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
     if request.url.path.startswith("/api/"):
@@ -491,15 +570,10 @@ def initialize_local_database() -> None:
 
 @app.get("/")
 def home():
-    return {
-        "name": APP_NAME,
-        "status": "running",
-        "version": APP_VERSION,
-        "environment": APP_ENV,
-        "docs": "/docs" if DOCS_ENABLED else None,
-        "health": "/health",
-        "readiness": "/ready",
-    }
+    index_file = STATIC_DIR / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file, headers={"Cache-Control": "no-cache"})
+    return {"name": APP_NAME, "status": "running", "version": APP_VERSION, "health": "/health", "readiness": "/ready"}
 
 
 @app.head("/")
@@ -602,6 +676,7 @@ def create_dataset(
         category=item.category,
         source=item.source,
         record_count=item.record_count,
+        price_usd=item.price_usd,
         license_status="pending_review",
         status="pending_review",
         content_hash=dataset_content_hash(stable),
@@ -632,6 +707,9 @@ def review_dataset(
         raise HTTPException(status_code=404, detail="Dataset not found.")
     if row.status != "pending_review":
         raise HTTPException(status_code=409, detail="Only pending datasets can be reviewed.")
+    if row.seller_subject == user["subject"]:
+        raise HTTPException(status_code=403, detail="A seller cannot review their own dataset.")
+    row.reviewer_subject = user["subject"]
     row.license_status = item.decision
     if item.decision == "rejected":
         row.status = "rejected"
@@ -664,12 +742,19 @@ def publish_dataset(
 
 @app.get("/api/marketplace/listings")
 def marketplace_listings(
-    _: dict[str, Any] = Depends(get_current_user),
+    q: str | None = Query(default=None, max_length=120),
+    category: str | None = Query(default=None, max_length=80),
     db: Session = Depends(get_db),
 ):
-    rows = db.scalars(select(Dataset).where(
+    statement = select(Dataset).where(
         Dataset.status == "published", Dataset.license_status == "approved"
-    ).order_by(Dataset.created_at.desc()).limit(500)).all()
+    )
+    if q:
+        search = "%" + q.strip().replace("%", "\\%").replace("_", "\\_") + "%"
+        statement = statement.where(or_(Dataset.name.ilike(search), Dataset.description.ilike(search), Dataset.category.ilike(search)))
+    if category:
+        statement = statement.where(Dataset.category == category)
+    rows = db.scalars(statement.order_by(Dataset.created_at.desc()).limit(500)).all()
     return {
         "items": [{
             "id": row.id,
@@ -678,6 +763,7 @@ def marketplace_listings(
             "description": row.description,
             "category": row.category,
             "record_count": row.record_count,
+            "price_usd": format(Decimal(row.price_usd), "f") if row.price_usd is not None else None,
             "content_hash": row.content_hash,
             "created_at": row.created_at,
         } for row in rows],
@@ -725,9 +811,9 @@ def create_trade(
     ))
     if dataset is None:
         raise HTTPException(status_code=404, detail="Published marketplace listing not found.")
-    amount = Decimal(item.amount_usd).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    if amount <= 0:
-        raise HTTPException(status_code=422, detail="Trade amount must be greater than zero.")
+    if dataset.price_usd is None or Decimal(dataset.price_usd) <= 0:
+        raise HTTPException(status_code=409, detail="This listing does not have a valid price.")
+    amount = Decimal(dataset.price_usd).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     trade_id = str(uuid.uuid4())
     created_at = utc_now()
     proof = {
