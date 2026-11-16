@@ -162,16 +162,24 @@ def get_current_user(authorization: str | None = Header(default=None)) -> dict[s
             token,
             signing_key,
             algorithms=["RS256", "ES256"],
-            audience=os.environ["OIDC_AUDIENCE"],
             issuer=os.environ["OIDC_ISSUER"],
-            options={"require": ["exp", "iat", "sub", "iss", "aud"]},
+            options={"require": ["exp", "iat", "sub", "iss"], "verify_aud": False},
             leeway=30,
         )
+        expected_audience = os.environ["OIDC_AUDIENCE"]
+        token_audience = claims.get("aud")
+        if token_audience:
+            audience_values = token_audience if isinstance(token_audience, list) else [token_audience]
+            if expected_audience not in audience_values:
+                raise HTTPException(status_code=401, detail="Access token audience is invalid.")
+        elif claims.get("client_id") != expected_audience:
+            # Cognito access tokens use client_id; standard OIDC tokens normally use aud.
+            raise HTTPException(status_code=401, detail="Access token audience is invalid.")
         tenant_id = claims.get("tenant_id") or claims.get("custom:tenant_id")
         subject = claims.get("sub")
         if not tenant_id or not subject:
             raise HTTPException(status_code=401, detail="The identity token is missing required tenant claims.")
-        roles = claims.get("roles", claims.get("groups", []))
+        roles = claims.get("roles", claims.get("groups", claims.get("cognito:groups", [])))
         if isinstance(roles, str):
             roles = [roles]
         if not isinstance(roles, list):
@@ -675,7 +683,7 @@ def create_trade_checkout(
         stripe.api_key = os.environ["STRIPE_SECRET_KEY"]
         try:
             existing_session = stripe.checkout.Session.retrieve(row.stripe_session_id)
-        except stripe.error.StripeError:
+        except Exception:
             raise HTTPException(status_code=502, detail="The existing Stripe Checkout session could not be retrieved.") from None
         if existing_session.status == "open":
             return {"checkout_url": existing_session.url, "session_id": existing_session.id, "trade_id": trade_id}
@@ -718,7 +726,7 @@ def create_trade_checkout(
             },
             idempotency_key="sudogemin-trade-" + row.id,
         )
-    except stripe.error.StripeError:
+    except Exception:
         raise HTTPException(status_code=502, detail="Stripe could not create checkout. Review the Stripe account and configuration.") from None
     row.stripe_session_id = session.id
     row.status = "checkout_created"
