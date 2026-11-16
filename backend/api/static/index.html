@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#101b2b">
+  <meta name="description" content="Sudogemin is a trusted B2B data marketplace for discovering, licensing, and delivering business datasets.">
+  <title>Sudogemin — B2B Data Brokerage</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <div class="announcement"><span class="pulse"></span> A more transparent way to source and license business data</div>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="Sudogemin home"><span class="brand-mark">S</span><span>sudo<span class="brand-light">gemin</span></span></a>
+    <nav class="main-nav" aria-label="Main navigation">
+      <a href="#marketplace">Marketplace</a><a href="#how-it-works">How it works</a><a href="#trust">Trust & verification</a>
+    </nav>
+    <div class="header-actions">
+      <button class="btn btn-quiet" id="nav-login">Sign in</button>
+      <button class="btn btn-dark" id="nav-dashboard">Open workspace <span aria-hidden="true">↗</span></button>
+      <button class="mobile-menu" id="mobile-menu" aria-label="Open menu">☰</button>
+    </div>
+  </header>
+
+  <main id="public-view">
+    <section class="hero shell">
+      <div class="hero-copy">
+        <div class="eyebrow"><span class="eyebrow-dot"></span> THE B2B DATA EXCHANGE</div>
+        <h1>Business data.<br><span class="headline-accent">Moved with trust.</span></h1>
+        <p class="hero-lede">Discover valuable business datasets, license the data you need, and bring your own data to market — with transparent approvals and verifiable transaction records.</p>
+        <div class="hero-actions">
+          <a class="btn btn-primary btn-large" href="#marketplace">Explore marketplace <span>→</span></a>
+          <button class="btn btn-outline btn-large" id="hero-sell">List your data</button>
+        </div>
+        <div class="hero-proof"><span class="proof-check">✓</span> Human-reviewed listings <span class="proof-separator">·</span> <span class="proof-check">✓</span> Secure checkout <span class="proof-separator">·</span> <span class="proof-check">✓</span> SHA-256 proofs</div>
+      </div>
+      <div class="hero-visual" aria-label="Illustration of a trusted B2B data exchange">
+        <div class="visual-orbit orbit-one"></div><div class="visual-orbit orbit-two"></div>
+        <div class="visual-core"><span class="core-glyph">S</span><small>DATA EXCHANGE</small></div>
+        <div class="visual-node node-top"><span class="node-icon">⌘</span><span><b>Business data</b><small>Curated sources</small></span></div>
+        <div class="visual-node node-right"><span class="node-icon green">↗</span><span><b>Verified trades</b><small>Proof-backed</small></span></div>
+        <div class="visual-node node-bottom"><span class="node-icon gold">◇</span><span><b>Human oversight</b><small>Approval gates</small></span></div>
+        <div class="visual-line line-a"></div><div class="visual-line line-b"></div><div class="visual-line line-c"></div>
+      </div>
+    </section>
+
+    <section class="trust-strip shell" id="trust">
+      <div><strong>Trust by design</strong><span>Every listing follows a review workflow.</span></div>
+      <div class="trust-item"><span class="trust-icon">⌑</span><span><b>Source transparency</b><small>Clear descriptions & provenance</small></span></div>
+      <div class="trust-item"><span class="trust-icon">◈</span><span><b>Cryptographic proofs</b><small>SHA-256 transaction records</small></span></div>
+      <div class="trust-item"><span class="trust-icon">▣</span><span><b>Secure delivery</b><small>Access after verified payment</small></span></div>
+    </section>
+
+    <section class="market-section shell" id="marketplace">
+      <div class="section-heading">
+        <div><div class="eyebrow">THE MARKETPLACE</div><h2>Find the data that<br>moves your business.</h2></div>
+        <p>Browse published datasets from approved sellers. Compare the scope, review the listing details, and request a purchase through a controlled workflow.</p>
+      </div>
+      <div class="market-controls">
+        <label class="searchbox"><span>⌕</span><input id="market-search" type="search" placeholder="Search datasets, industries, or keywords" maxlength="120"><kbd>↵</kbd></label>
+        <select id="market-category" aria-label="Filter by category">
+          <option value="">All categories</option>
+          <option value="market-research">Market research</option><option value="firmographic">Firmographic</option>
+          <option value="healthcare">Healthcare</option><option value="financial">Financial</option>
+          <option value="industrial">Industrial</option><option value="logistics">Logistics</option>
+        </select>
+      </div>
+      <div id="market-status" class="inline-status" role="status">Loading published listings…</div>
+      <div class="listing-grid" id="listing-grid"></div>
+      <div class="market-empty" id="market-empty" hidden><div class="empty-icon">⌕</div><h3>No published listings yet</h3><p>New datasets appear after seller submission, license review, and publication. Create an account to list your own data or check back soon.</p><button class="btn btn-dark" id="empty-sell">Become a seller</button></div>
+    </section>
+
+    <section class="steps-section" id="how-it-works">
+      <div class="shell">
+        <div class="section-heading light-heading">
+          <div><div class="eyebrow">A CLEARER WAY TO TRADE</div><h2>From discovery<br>to delivery.</h2></div>
+          <p>Buyers and sellers work inside verified company accounts. Each trade has a defined approval and payment sequence.</p>
+        </div>
+        <div class="steps-grid">
+          <article class="step-card"><span class="step-number">01</span><div class="step-icon">⌕</div><h3>Discover</h3><p>Search published datasets by category, description, and business use case.</p></article>
+          <article class="step-card"><span class="step-number">02</span><div class="step-icon">▤</div><h3>Review & agree</h3><p>Submit a purchase request. An authorized approver confirms the commercial commitment.</p></article>
+          <article class="step-card"><span class="step-number">03</span><div class="step-icon">↗</div><h3>Pay securely</h3><p>Complete checkout with Stripe. Payment status is confirmed by a signed webhook.</p></article>
+          <article class="step-card"><span class="step-number">04</span><div class="step-icon">◇</div><h3>Receive & verify</h3><p>Access purchased files securely and verify the trade's SHA-256 proof record.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="seller-cta shell">
+      <div class="seller-cta-copy"><div class="eyebrow">FOR DATA OWNERS</div><h2>Your data can<br>create new value.</h2><p>Publish a business dataset, set your price, complete seller verification, and manage every request from your company workspace.</p><button class="btn btn-primary btn-large" id="cta-sell">Start selling <span>→</span></button></div>
+      <div class="seller-cta-panel"><div class="panel-tag">SELLER WORKSPACE</div><div class="panel-row"><span class="mini-icon">▤</span><span><b>Dataset listing</b><small>Metadata, scope & price</small></span><span class="panel-state">Draft</span></div><div class="panel-row"><span class="mini-icon green">✓</span><span><b>Compliance review</b><small>Human approval required</small></span><span class="panel-state">Review</span></div><div class="panel-row"><span class="mini-icon gold">↗</span><span><b>Seller payouts</b><small>Stripe Connect onboarding</small></span><span class="panel-state">Secure</span></div></div>
+    </section>
+  </main>
+
+  <main id="portal-view" class="portal-shell" hidden>
+    <aside class="portal-sidebar">
+      <a class="brand sidebar-brand" href="/"><span class="brand-mark">S</span><span>sudo<span class="brand-light">gemin</span></span></a>
+      <div class="workspace-label">COMPANY WORKSPACE</div>
+      <select id="workspace-select" class="workspace-select" aria-label="Select company workspace"></select>
+      <nav class="portal-nav" aria-label="Workspace navigation">
+        <button class="portal-tab active" data-tab="overview"><span>◫</span> Overview</button>
+        <button class="portal-tab" data-tab="marketplace"><span>⌕</span> Marketplace</button>
+        <button class="portal-tab" data-tab="datasets"><span>▤</span> My datasets</button>
+        <button class="portal-tab" data-tab="orders"><span>↗</span> Orders & trades</button>
+        <button class="portal-tab" data-tab="company"><span>⌂</span> Company & team</button>
+        <button class="portal-tab" data-tab="payouts"><span>◇</span> Seller payouts</button>
+        <button class="portal-tab admin-only" data-tab="acquisition" hidden><span>⌕</span> AI acquisition</button>
+      </nav>
+      <div class="sidebar-bottom"><div class="secure-note"><span>◈</span><div><b>Secure workspace</b><small>Access is tenant-isolated</small></div></div><button class="signout-link" id="signout">↪ Sign out</button></div>
+    </aside>
+    <section class="portal-main">
+      <header class="portal-topbar"><div><span class="breadcrumb">Workspace</span><span class="breadcrumb-current" id="current-tab-title">Overview</span></div><div class="topbar-user"><span class="user-avatar" id="user-avatar">S</span><span class="user-email" id="user-email">Signed in</span><button class="btn btn-quiet btn-small" id="portal-home">Public site</button></div></header>
+      <div class="portal-content" id="portal-content">
+        <div class="inline-status">Loading company workspace…</div>
+      </div>
+    </section>
+  </main>
+
+  <div class="toast-region" id="toast-region" aria-live="polite"></div>
+  <footer class="site-footer"><div class="shell footer-inner"><a class="brand footer-brand" href="/"><span class="brand-mark">S</span><span>sudo<span class="brand-light">gemin</span></span></a><span>© <span id="year"></span> Sudogemin. Built for trusted business data exchange.</span><div><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="mailto:support@sudogemin.com">Support</a></div></div></footer>
+</body>
+</html>
