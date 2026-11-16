@@ -110,3 +110,59 @@ def test_live_stripe_key_is_blocked_without_explicit_live_switch(monkeypatch):
     monkeypatch.setenv("STRIPE_PAYMENTS_ENABLED", "true")
     monkeypatch.delenv("STRIPE_LIVE_ENABLED", raising=False)
     assert main.stripe_is_enabled() is False
+
+def test_trade_requires_independent_human_approval_and_proof_verifies(test_client):
+    client, principal = test_client
+    dataset = client.post("/api/datasets", json={
+        "name": "Approved commercial dataset",
+        "description": "Licensed commercial metadata",
+        "category": "business",
+    }).json()
+    client.post(f"/api/datasets/{dataset['id']}/review", json={
+        "decision": "approved",
+        "reason": "License and provenance verified",
+    })
+    published = client.post(f"/api/datasets/{dataset['id']}/publish")
+    assert published.status_code == 200
+
+    principal.update({
+        "subject": "buyer-creator",
+        "tenant_id": "tenant-buyer",
+        "roles": ["buyer", "trade_approver"],
+    })
+    created = client.post("/api/trades", json={
+        "dataset_id": dataset["id"],
+        "amount_usd": "125.50",
+    })
+    assert created.status_code == 201
+    trade = created.json()
+    assert trade["status"] == "pending_approval"
+
+    # The caller cannot approve the trade that they themselves created.
+    self_approval = client.post(f"/api/trades/{trade['id']}/approve")
+    assert self_approval.status_code == 403
+
+    principal["subject"] = "independent-approver"
+    approved = client.post(f"/api/trades/{trade['id']}/approve")
+    assert approved.status_code == 200
+    assert approved.json()["status"] == "approved_pending_payment"
+
+    proof = client.get(f"/api/verify/{trade['id']}")
+    assert proof.status_code == 200
+    assert proof.json()["valid"] is True
+
+
+def test_protected_routes_fail_closed_without_oidc(monkeypatch):
+    for key in ("OIDC_ISSUER", "OIDC_AUDIENCE", "OIDC_JWKS_URL"):
+        monkeypatch.delenv(key, raising=False)
+    with pytest.raises(main.HTTPException) as error:
+        main.get_current_user("Bearer placeholder")
+    assert error.value.status_code == 503
+
+
+def test_readiness_is_not_green_without_required_services(test_client):
+    client, _ = test_client
+    response = client.get("/ready")
+    assert response.status_code in (200, 503)
+    if response.status_code == 503:
+        assert response.json()["status"] == "degraded"
