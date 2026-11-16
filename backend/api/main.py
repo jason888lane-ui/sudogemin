@@ -25,6 +25,7 @@ import stripe
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import JSON, Boolean, ForeignKey, Index, Numeric, String, UniqueConstraint, create_engine, func, or_, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -640,6 +641,11 @@ app = FastAPI(
 )
 
 
+STATIC_DIR = Path(__file__).parent / "static"
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
 if os.getenv("CORS_ALLOW_ORIGINS"):
     allowed_origins = [origin.strip() for origin in os.getenv("CORS_ALLOW_ORIGINS", "").split(",") if origin.strip()]
     if allowed_origins:
@@ -675,16 +681,10 @@ def initialize_local_database() -> None:
 
 @app.get("/")
 def home():
-    return {
-        "name": APP_NAME,
-        "status": "running",
-        "version": APP_VERSION,
-        "environment": APP_ENV,
-        "docs": "/docs" if DOCS_ENABLED else None,
-        "health": "/health",
-        "readiness": "/ready",
-    }
-
+    index_file = STATIC_DIR / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file, headers={"Cache-Control": "no-cache"})
+    return {"name": APP_NAME, "status": "running", "version": APP_VERSION, "health": "/health", "readiness": "/ready"}
 
 @app.head("/")
 def head_home():
@@ -790,6 +790,92 @@ def run_autonomous_prospecting(
     expected = os.getenv("PROSPECTING_JOB_TOKEN", "")
     if not expected or not x_prospecting_token or not hmac.compare_digest(expected, x_prospecting_token):
         raise HTTPException(status_code=401, detail="Invalid prospecting job token.")
+    return _gemini_discover_companies(db, max_results=max(1, min(int(os.getenv("PROSPECTING_BATCH_SIZE", "12")), 30)))
+
+
+@app.post("/api/prospecting/prospects/{prospect_id}/review")
+def review_prospect(
+    prospect_id: str,
+    decision: str = Query(pattern="^(approve|dismiss)$"),
+    user: dict[str, Any] = Depends(require_roles("platform_admin", "business_development")),
+    db: Session = Depends(get_db),
+):
+    row = db.get(Prospect, prospect_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Prospect not found.")
+    if row.status != "needs_review":
+        raise HTTPException(status_code=409, detail="Only prospects awaiting review can be changed.")
+    row.status = "approved_for_outreach" if decision == "approve" else "dismissed"
+    row.reviewed_by = user["subject"]
+    row.reviewed_at = utc_now()
+    record_audit(db, "platform", user["subject"], "prospect." + decision, "prospect", prospect_id, {"domain": row.domain})
+    db.commit()
+    return {"id": row.id, "domain": row.domain, "status": row.status}
+
+
+@app.get("/auth/config")
+def auth_config(request: Request):
+    return {
+        "enabled": all(os.getenv(k) for k in ("OIDC_AUTHORIZATION_URL", "OIDC_TOKEN_URL", "OIDC_CLIENT_ID")),
+        "authorization_url": os.getenv("OIDC_AUTHORIZATION_URL", ""),
+        "client_id": os.getenv("OIDC_CLIENT_ID", ""),
+        "redirect_uri": os.getenv("OIDC_REDIRECT_URI", str(request.base_url).rstrip("/") + "/auth/callback"),
+        "scope": os.getenv("OIDC_SCOPE", "openid profile email"),
+        "signup_url": os.getenv("OIDC_SIGNUP_URL", ""),
+    }
+
+
+@app.post("/auth/token")
+def exchange_authorization_code(payload: dict[str, str]):
+    token_url = os.getenv("OIDC_TOKEN_URL", "")
+    client_id = os.getenv("OIDC_CLIENT_ID", "")
+    if not token_url or not client_id:
+        raise HTTPException(status_code=503, detail="OIDC authorization-code flow is not configured.")
+    code_value = payload.get("code", "")
+    verifier = payload.get("code_verifier", "")
+    redirect_uri = payload.get("redirect_uri", "")
+    expected_redirect = os.getenv("OIDC_REDIRECT_URI", "")
+    if not code_value or not verifier or not redirect_uri or (expected_redirect and redirect_uri != expected_redirect):
+        raise HTTPException(status_code=400, detail="Authorization code, PKCE verifier, or redirect URI is invalid.")
+    form = {
+        "grant_type": "authorization_code", "client_id": client_id, "code": code_value,
+        "redirect_uri": redirect_uri, "code_verifier": verifier,
+    }
+    if os.getenv("OIDC_CLIENT_SECRET"):
+        form["client_secret"] = os.environ["OIDC_CLIENT_SECRET"]
+    request = URLRequest(
+        token_url, data=__import__("urllib.parse", fromlist=["urlencode"]).urlencode(form).encode(),
+        headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST",
+    )
+    try:
+        with urlopen(request, timeout=20) as response:
+            result = json.loads(response.read(500_000).decode("utf-8"))
+    except Exception:
+        raise HTTPException(status_code=401, detail="Identity provider rejected the authorization-code exchange.") from None
+    if not result.get("access_token"):
+        raise HTTPException(status_code=401, detail="Identity provider did not return an access token.")
+    return {
+        "access_token": result["access_token"],
+        "token_type": result.get("token_type", "Bearer"),
+        "expires_in": result.get("expires_in"),
+        "scope": result.get("scope"),
+        "id_token": result.get("id_token"),
+    }
+
+
+@app.get("/auth/callback")
+def auth_callback():
+    index_file = STATIC_DIR / "index.html"
+    if not index_file.exists():
+        raise HTTPException(status_code=404, detail="Customer portal is not installed.")
+    return FileResponse(index_file, headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/api/prospecting/run")
+def run_prospecting_now(
+    user: dict[str, Any] = Depends(require_roles("platform_admin", "business_development")),
+    db: Session = Depends(get_db),
+):
     return _gemini_discover_companies(db, max_results=max(1, min(int(os.getenv("PROSPECTING_BATCH_SIZE", "12")), 30)))
 
 
