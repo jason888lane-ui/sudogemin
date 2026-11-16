@@ -166,3 +166,9 @@ def test_readiness_is_not_green_without_required_services(test_client):
     assert response.status_code in (200, 503)
     if response.status_code == 503:
         assert response.json()["status"] == "degraded"
+
+
+def test_render_head_probe_returns_success(test_client):
+    client, _ = test_client
+    response = client.head("/")
+    assert response.status_code == 200
