@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 import jwt
 import stripe
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -808,6 +808,29 @@ async def stripe_webhook(
             return {"received": True, "duplicate": True}
         raise HTTPException(status_code=409, detail="Webhook event could not be committed safely.") from None
     return {"received": True, "event_type": event_type}
+
+
+@app.get("/api/audit")
+def list_audit_events(
+    limit: int = Query(default=100, ge=1, le=500),
+    user: dict[str, Any] = Depends(require_roles("audit_reader", "tenant_admin")),
+    db: Session = Depends(get_db),
+):
+    rows = db.scalars(select(AuditEvent).where(
+        AuditEvent.tenant_id == user["tenant_id"]
+    ).order_by(AuditEvent.created_at.desc()).limit(limit)).all()
+    return {
+        "items": [{
+            "id": row.id,
+            "actor_subject": row.actor_subject,
+            "action": row.action,
+            "resource_type": row.resource_type,
+            "resource_id": row.resource_id,
+            "details": row.details,
+            "created_at": row.created_at,
+        } for row in rows],
+        "count": len(rows),
+    }
 
 
 @app.get("/api/trades")
