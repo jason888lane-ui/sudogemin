@@ -447,7 +447,9 @@ def serialize_trade(row: Trade) -> dict[str, Any]:
         "id": row.id,
         "dataset_id": row.dataset_id,
         "buyer_tenant_id": row.buyer_tenant_id,
+        "buyer_subject": row.buyer_subject,
         "seller_tenant_id": row.seller_tenant_id,
+        "approval_subject": row.approval_subject,
         "amount_usd": format(Decimal(row.amount_usd).quantize(Decimal("0.01")), "f"),
         "currency": row.currency,
         "status": row.status,
@@ -501,6 +503,11 @@ class AuthTokenIn(BaseModel):
     code_verifier: str = Field(min_length=43, max_length=128)
     nonce: str = Field(min_length=16, max_length=256)
     redirect_uri: str = Field(min_length=10, max_length=512)
+
+
+class AssistantChatIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    message: str = Field(min_length=2, max_length=1200)
 
 
 class DatasetReviewIn(BaseModel):
@@ -580,6 +587,22 @@ def home():
 def head_home():
     # Render's default HTTP probe uses HEAD on the root path.
     return Response(status_code=200, headers={"Cache-Control": "no-store"})
+
+
+def portal_page():
+    index_file = STATIC_DIR / "index.html"
+    if not index_file.exists():
+        raise HTTPException(status_code=404, detail="Customer portal is not installed.")
+    return FileResponse(index_file, headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/portal")
+@app.get("/auth/callback")
+@app.get("/accept-invite")
+@app.get("/privacy")
+@app.get("/terms")
+def customer_portal_pages():
+    return portal_page()
 
 
 @app.get("/health")
@@ -1040,6 +1063,8 @@ def create_trade(
     ))
     if dataset is None:
         raise HTTPException(status_code=404, detail="Published marketplace listing not found.")
+    if dataset.tenant_id == user["tenant_id"]:
+        raise HTTPException(status_code=409, detail="A company cannot purchase its own listing.")
     if dataset.price_usd is None or Decimal(dataset.price_usd) <= 0:
         raise HTTPException(status_code=409, detail="This listing does not have a valid price.")
     amount = Decimal(dataset.price_usd).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
@@ -1583,6 +1608,43 @@ def list_discovery_runs(
         "prospects_updated": row.prospects_updated, "error_summary": row.error_summary,
         "started_at": row.started_at, "finished_at": row.finished_at,
     } for row in rows]}
+
+
+@app.post("/api/assistant/chat")
+def customer_help_assistant(
+    item: AssistantChatIn,
+    _: dict[str, Any] = Depends(get_current_user),
+):
+    key = os.getenv("GEMINI_API_KEY", "")
+    if not key:
+        raise HTTPException(status_code=503, detail="The AI help assistant is not configured yet.")
+    model = os.getenv("GEMINI_ASSISTANT_MODEL", os.getenv("GEMINI_DISCOVERY_MODEL", "gemini-3.8-flash"))
+    prompt = (
+        "You are Sudogemin's customer support assistant. Help users understand account onboarding, "
+        "B2B dataset listings, licensing review, company invitations, purchase approvals, Stripe Checkout, "
+        "seller payouts, secure file uploads, paid file delivery, and SHA-256 transaction verification. "
+        "Never claim to have changed a customer account, approved a listing, sent a message, initiated a payment, "
+        "or accessed private data. Do not request or reveal passwords, API keys, payment card numbers, or secrets. "
+        "Do not provide legal, tax, investment, or financial advice. For disputes and compliance questions, "
+        "direct the user to human support. Keep the answer brief and practical. User question: " + item.message
+    )
+    payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}]}
+    request = UrlRequest(
+        "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "x-goog-api-key": key},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=25) as response:
+            data = json.loads(response.read(262144))
+        parts = (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
+        answer = "".join(part.get("text", "") for part in parts).strip()
+        if not answer:
+            raise ValueError("Empty assistant response")
+        return {"answer": answer[:5000], "model": model}
+    except Exception:
+        raise HTTPException(status_code=502, detail="The help assistant is temporarily unavailable.") from None
 
 
 @app.get("/api/audit")
