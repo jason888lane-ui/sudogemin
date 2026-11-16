@@ -1,25 +1,32 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
+import secrets
 import json
 import os
 import re
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Callable
 from urllib.parse import quote, urlparse
 from urllib.request import Request as URLRequest, urlopen
+from pathlib import Path
+
+import boto3
+from botocore.config import Config as BotoConfig
+from botocore.exceptions import BotoCoreError, ClientError
 
 import jwt
 import stripe
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import JSON, ForeignKey, Index, Numeric, String, create_engine, func, or_, select, text
+from sqlalchemy import JSON, Boolean, ForeignKey, Index, Numeric, String, UniqueConstraint, create_engine, func, or_, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from jwt import PyJWKClient
@@ -154,6 +161,21 @@ class OrganizationInvite(Base):
     created_at: Mapped[str] = mapped_column(String(40), nullable=False)
     expires_at: Mapped[str] = mapped_column(String(40), nullable=False)
     accepted_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
+class DataAsset(Base):
+    __tablename__ = "data_assets"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(160), index=True, nullable=False)
+    dataset_id: Mapped[str] = mapped_column(ForeignKey("datasets.id"), index=True, nullable=False)
+    uploader_subject: Mapped[str] = mapped_column(String(200), nullable=False)
+    object_key: Mapped[str] = mapped_column(String(1024), unique=True, nullable=False)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(nullable=False)
+    checksum_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending_upload")
+    created_at: Mapped[str] = mapped_column(String(40), nullable=False)
 
 
 class Prospect(Base):
@@ -1078,6 +1100,148 @@ def match_buyer(
     return {"matches": results}
 
 
+def _object_store():
+    bucket = os.getenv("S3_BUCKET", "").strip()
+    if not bucket:
+        raise HTTPException(status_code=503, detail="Private object storage is not configured.")
+    options = {"region_name": os.getenv("AWS_REGION", "us-east-2"), "config": BotoConfig(signature_version="s3v4")}
+    if os.getenv("S3_ENDPOINT_URL"):
+        options["endpoint_url"] = os.environ["S3_ENDPOINT_URL"]
+    if os.getenv("S3_ACCESS_KEY_ID") and os.getenv("S3_SECRET_ACCESS_KEY"):
+        options["aws_access_key_id"] = os.environ["S3_ACCESS_KEY_ID"]
+        options["aws_secret_access_key"] = os.environ["S3_SECRET_ACCESS_KEY"]
+    try:
+        return boto3.client("s3", **options), bucket
+    except Exception:
+        raise HTTPException(status_code=503, detail="Private object storage could not be initialized.") from None
+
+
+@app.post("/api/datasets/{dataset_id}/assets/upload-url", status_code=201)
+def create_asset_upload(
+    dataset_id: str,
+    item: AssetUploadIn,
+    user: dict[str, Any] = Depends(require_roles("seller", "tenant_admin")),
+    db: Session = Depends(get_db),
+):
+    dataset = db.scalar(select(Dataset).where(
+        Dataset.id == dataset_id, Dataset.tenant_id == user["tenant_id"]
+    ))
+    if not dataset or dataset.status not in {"pending_review", "published"}:
+        raise HTTPException(status_code=404, detail="Seller dataset not found.")
+    filename = Path(item.filename).name.replace("\\", "_").replace("/", "_")
+    if filename in {"", ".", ".."} or filename.startswith("."):
+        raise HTTPException(status_code=422, detail="Filename is not allowed.")
+    allowed = {
+        "text/csv", "application/json", "application/x-ndjson",
+        "application/vnd.apache.parquet", "application/octet-stream",
+        "application/zip",
+    }
+    if item.content_type not in allowed:
+        raise HTTPException(status_code=415, detail="File type is not supported.")
+    asset_id = str(uuid.uuid4())
+    object_key = f"private/{user['tenant_id']}/{dataset_id}/{asset_id}/{filename}"
+    checksum_b64 = base64.b64encode(bytes.fromhex(item.checksum_sha256)).decode("ascii")
+    client, bucket = _object_store()
+    try:
+        upload_url = client.generate_presigned_url(
+            "put_object",
+            Params={
+                "Bucket": bucket, "Key": object_key, "ContentType": item.content_type,
+                "Metadata": {"sha256": item.checksum_sha256.lower(), "asset-id": asset_id},
+                "ChecksumSHA256": checksum_b64,
+            },
+            ExpiresIn=900,
+            HttpMethod="PUT",
+        )
+    except (BotoCoreError, ClientError):
+        raise HTTPException(status_code=502, detail="Could not create a secure object upload URL.") from None
+    row = DataAsset(
+        id=asset_id, tenant_id=user["tenant_id"], dataset_id=dataset_id,
+        uploader_subject=user["subject"], object_key=object_key, filename=filename,
+        content_type=item.content_type, size_bytes=item.size_bytes,
+        checksum_sha256=item.checksum_sha256.lower(), status="pending_upload", created_at=utc_now(),
+    )
+    db.add(row)
+    record_audit(db, user["tenant_id"], user["subject"], "dataset.asset_upload_started", "data_asset", asset_id)
+    db.commit()
+    return {"asset_id": asset_id, "upload_url": upload_url, "expires_in_seconds": 900, "required_headers": {
+        "Content-Type": item.content_type,
+        "x-amz-meta-sha256": item.checksum_sha256.lower(),
+        "x-amz-meta-asset-id": asset_id,
+        "x-amz-checksum-sha256": checksum_b64,
+    }}
+
+
+@app.post("/api/datasets/{dataset_id}/assets/{asset_id}/complete")
+def complete_asset_upload(
+    dataset_id: str,
+    asset_id: str,
+    user: dict[str, Any] = Depends(require_roles("seller", "tenant_admin")),
+    db: Session = Depends(get_db),
+):
+    row = db.scalar(select(DataAsset).where(
+        DataAsset.id == asset_id, DataAsset.dataset_id == dataset_id,
+        DataAsset.tenant_id == user["tenant_id"],
+    ))
+    if row is None:
+        raise HTTPException(status_code=404, detail="Asset upload not found.")
+    if row.status == "available":
+        return {"asset_id": asset_id, "status": "available"}
+    client, bucket = _object_store()
+    try:
+        head = client.head_object(Bucket=bucket, Key=row.object_key, ChecksumMode="ENABLED")
+    except (BotoCoreError, ClientError):
+        raise HTTPException(status_code=409, detail="Uploaded object is not yet available in private storage.") from None
+    metadata = head.get("Metadata") or {}
+    if (
+        int(head.get("ContentLength", -1)) != row.size_bytes
+        or metadata.get("sha256") != row.checksum_sha256
+        or metadata.get("asset-id") != row.id
+    ):
+        row.status = "quarantined"
+        record_audit(db, user["tenant_id"], user["subject"], "dataset.asset_quarantined", "data_asset", asset_id)
+        db.commit()
+        raise HTTPException(status_code=422, detail="Uploaded object failed size or checksum metadata verification.")
+    row.status = "available"
+    dataset = db.get(Dataset, row.dataset_id)
+    if dataset:
+        record_audit(db, user["tenant_id"], user["subject"], "dataset.asset_available", "data_asset", asset_id)
+    db.commit()
+    return {"asset_id": asset_id, "status": "available", "size_bytes": row.size_bytes, "sha256": row.checksum_sha256}
+
+
+@app.get("/api/trades/{trade_id}/assets/{asset_id}/download")
+def download_paid_asset(
+    trade_id: str,
+    asset_id: str,
+    user: dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    trade = db.scalar(select(Trade).where(
+        Trade.id == trade_id, Trade.buyer_tenant_id == user["tenant_id"],
+        Trade.payment_status == "paid", Trade.status == "paid",
+    ))
+    if not trade:
+        raise HTTPException(status_code=404, detail="A paid purchase is required to access this asset.")
+    asset = db.scalar(select(DataAsset).where(
+        DataAsset.id == asset_id, DataAsset.dataset_id == trade.dataset_id,
+        DataAsset.status == "available",
+    ))
+    if not asset:
+        raise HTTPException(status_code=404, detail="Purchased dataset asset not found.")
+    client, bucket = _object_store()
+    try:
+        url = client.generate_presigned_url(
+            "get_object", Params={"Bucket": bucket, "Key": asset.object_key, "ResponseContentDisposition": f'attachment; filename="{asset.filename}"'},
+            ExpiresIn=300,
+        )
+    except (BotoCoreError, ClientError):
+        raise HTTPException(status_code=502, detail="Secure download could not be created.") from None
+    record_audit(db, user["tenant_id"], user["subject"], "dataset.asset_download_url_created", "data_asset", asset_id, {"trade_id": trade_id})
+    db.commit()
+    return {"download_url": url, "expires_in_seconds": 300, "filename": asset.filename}
+
+
 @app.post("/api/trades", status_code=201)
 def create_trade(
     item: TradeIn,
@@ -1151,6 +1315,64 @@ def approve_trade(
     return serialize_trade(row)
 
 
+@app.post("/api/seller/connect/onboarding")
+def seller_connect_onboarding(
+    user: dict[str, Any] = Depends(require_roles("seller", "tenant_admin")),
+    db: Session = Depends(get_db),
+):
+    if not stripe_is_enabled():
+        raise HTTPException(status_code=503, detail="Stripe Connect is not configured or enabled.")
+    tenant = db.get(Tenant, user["tenant_id"])
+    if not tenant:
+        raise HTTPException(status_code=409, detail="Company workspace is not registered for Connect payouts.")
+    stripe.api_key = os.environ["STRIPE_SECRET_KEY"]
+    frontend = os.getenv("APP_BASE_URL", "").rstrip("/")
+    if not frontend.startswith("https://"):
+        raise HTTPException(status_code=503, detail="Set APP_BASE_URL to the verified HTTPS customer portal URL.")
+    try:
+        if not tenant.stripe_account_id:
+            account = stripe.Account.create(
+                type="express",
+                country=tenant.country,
+                email=user.get("email") or None,
+                capabilities={"card_payments": {"requested": True}, "transfers": {"requested": True}},
+                metadata={"tenant_id": tenant.id, "tenant_slug": tenant.slug},
+            )
+            tenant.stripe_account_id = account.id
+            db.commit()
+        link = stripe.AccountLink.create(
+            account=tenant.stripe_account_id,
+            refresh_url=frontend + "/dashboard?connect=refresh",
+            return_url=frontend + "/dashboard?connect=return",
+            type="account_onboarding",
+        )
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=502, detail="Stripe Connect onboarding could not be started. Check platform Connect eligibility.") from None
+    return {"onboarding_url": link.url, "account_id": tenant.stripe_account_id}
+
+
+@app.get("/api/seller/connect/status")
+def seller_connect_status(
+    user: dict[str, Any] = Depends(require_roles("seller", "tenant_admin")),
+    db: Session = Depends(get_db),
+):
+    tenant = db.get(Tenant, user["tenant_id"])
+    if not tenant or not tenant.stripe_account_id:
+        return {"connected": False, "charges_enabled": False, "payouts_enabled": False}
+    if not stripe_is_enabled():
+        return {"connected": True, "charges_enabled": tenant.stripe_charges_enabled, "payouts_enabled": tenant.stripe_payouts_enabled, "refresh_required": True}
+    stripe.api_key = os.environ["STRIPE_SECRET_KEY"]
+    try:
+        account = stripe.Account.retrieve(tenant.stripe_account_id)
+    except Exception:
+        raise HTTPException(status_code=502, detail="Stripe Connect account status could not be retrieved.") from None
+    tenant.stripe_charges_enabled = bool(account.charges_enabled)
+    tenant.stripe_payouts_enabled = bool(account.payouts_enabled)
+    db.commit()
+    return {"connected": True, "charges_enabled": tenant.stripe_charges_enabled, "payouts_enabled": tenant.stripe_payouts_enabled, "details_submitted": bool(account.details_submitted)}
+
+
 def stripe_is_enabled() -> bool:
     secret = os.getenv("STRIPE_SECRET_KEY", "")
     enabled = os.getenv("STRIPE_PAYMENTS_ENABLED", "false").lower() == "true"
@@ -1195,8 +1417,11 @@ def create_trade_checkout(
     if not os.getenv("STRIPE_SECRET_KEY"):
         raise HTTPException(status_code=503, detail="Stripe secret key is missing.")
     dataset = db.get(Dataset, row.dataset_id)
-    if dataset is None:
-        raise HTTPException(status_code=409, detail="The dataset listing no longer exists.")
+    seller = db.get(Tenant, row.seller_tenant_id)
+    if dataset is None or seller is None:
+        raise HTTPException(status_code=409, detail="The dataset listing or seller workspace no longer exists.")
+    if not seller.stripe_account_id or not seller.stripe_charges_enabled or not seller.stripe_payouts_enabled:
+        raise HTTPException(status_code=409, detail="The seller must complete Stripe Connect onboarding before checkout can proceed.")
     stripe.api_key = os.environ["STRIPE_SECRET_KEY"]
     amount_cents = int((Decimal(row.amount_usd) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
     try:
@@ -1214,6 +1439,11 @@ def create_trade_checkout(
             success_url=base_url + "/billing/success?trade_id=" + row.id,
             cancel_url=base_url + "/billing/cancel?trade_id=" + row.id,
             client_reference_id=row.id,
+            payment_intent_data={
+                "transfer_data": {"destination": seller.stripe_account_id},
+                "application_fee_amount": int((Decimal(row.amount_usd) * 100 * Decimal(os.getenv("PLATFORM_FEE_BPS", "1000")) / Decimal("10000")).quantize(Decimal("1"), rounding=ROUND_HALF_UP)),
+                "metadata": {"trade_id": row.id, "seller_tenant_id": row.seller_tenant_id},
+            },
             metadata={
                 "trade_id": row.id,
                 "buyer_tenant_id": row.buyer_tenant_id,
