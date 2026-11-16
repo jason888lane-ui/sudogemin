@@ -6,3 +6,4 @@ psycopg[binary]>=3.2,<4
 alembic>=1.14,<2
 PyJWT[crypto]>=2.10,<3
 stripe>=12,<15
+boto3>=1.35,<2
