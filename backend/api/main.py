@@ -70,6 +70,8 @@ class Dataset(Base):
     category: Mapped[str] = mapped_column(String(80), nullable=False, default="general")
     source: Mapped[str] = mapped_column(String(200), nullable=False, default="user-submitted")
     record_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    price_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    reviewer_subject: Mapped[str | None] = mapped_column(String(200), nullable=True)
     license_status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending_review")
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending_review")
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -91,6 +93,7 @@ class Trade(Base):
     approved_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
     merkle_root: Mapped[str] = mapped_column(String(64), nullable=False)
     stripe_session_id: Mapped[str | None] = mapped_column(String(200), unique=True, nullable=True)
+    stripe_payment_intent_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[str] = mapped_column(String(40), nullable=False)
     updated_at: Mapped[str] = mapped_column(String(40), nullable=False)
 
@@ -112,6 +115,45 @@ class StripeEvent(Base):
     id: Mapped[str] = mapped_column(String(200), primary_key=True)
     event_type: Mapped[str] = mapped_column(String(120), nullable=False)
     received_at: Mapped[str] = mapped_column(String(40), nullable=False)
+
+
+class Tenant(Base):
+    __tablename__ = "tenants"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    slug: Mapped[str] = mapped_column(String(120), unique=True, index=True, nullable=False)
+    domain: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
+    country: Mapped[str] = mapped_column(String(2), nullable=False, default="US")
+    website: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_by_subject: Mapped[str] = mapped_column(String(200), nullable=False)
+    stripe_account_id: Mapped[str | None] = mapped_column(String(100), unique=True, nullable=True)
+    stripe_charges_enabled: Mapped[bool] = mapped_column(nullable=False, default=False)
+    stripe_payouts_enabled: Mapped[bool] = mapped_column(nullable=False, default=False)
+    created_at: Mapped[str] = mapped_column(String(40), nullable=False)
+
+
+class TenantMembership(Base):
+    __tablename__ = "tenant_memberships"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True, nullable=False)
+    subject: Mapped[str] = mapped_column(String(200), index=True, nullable=False)
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    roles: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="active")
+    created_at: Mapped[str] = mapped_column(String(40), nullable=False)
+
+
+class OrganizationInvite(Base):
+    __tablename__ = "organization_invites"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True, nullable=False)
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    roles: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    created_by_subject: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_at: Mapped[str] = mapped_column(String(40), nullable=False)
+    expires_at: Mapped[str] = mapped_column(String(40), nullable=False)
+    accepted_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
 
 class Prospect(Base):
@@ -137,9 +179,25 @@ class Prospect(Base):
     reviewed_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
 
+class DataAsset(Base):
+    __tablename__ = "data_assets"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(160), index=True, nullable=False)
+    dataset_id: Mapped[str] = mapped_column(ForeignKey("datasets.id"), index=True, nullable=False)
+    uploader_subject: Mapped[str] = mapped_column(String(200), nullable=False)
+    object_key: Mapped[str] = mapped_column(String(1024), unique=True, nullable=False)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(nullable=False)
+    checksum_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending_upload")
+    created_at: Mapped[str] = mapped_column(String(40), nullable=False)
+
+
 Index("ix_datasets_marketplace", Dataset.status, Dataset.license_status)
 Index("ix_trades_buyer_status", Trade.buyer_tenant_id, Trade.status)
 Index("ix_trades_seller_status", Trade.seller_tenant_id, Trade.status)
+Index("ix_tenant_memberships_subject_status", TenantMembership.subject, TenantMembership.status)
 
 
 DB_URL = _database_url()
@@ -170,7 +228,7 @@ def identity_configured() -> bool:
     return all(os.getenv(key) for key in ("OIDC_ISSUER", "OIDC_AUDIENCE", "OIDC_JWKS_URL"))
 
 
-def get_current_user(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+def get_verified_identity(authorization: str | None = Header(default=None)) -> dict[str, Any]:
     if not identity_configured():
         raise HTTPException(status_code=503, detail="Identity provider is not configured. Set OIDC_ISSUER, OIDC_AUDIENCE, and OIDC_JWKS_URL.")
     if not authorization or not authorization.startswith("Bearer "):
@@ -186,37 +244,59 @@ def get_current_user(authorization: str | None = Header(default=None)) -> dict[s
             _jwks_clients[jwks_url] = client
         signing_key = client.get_signing_key_from_jwt(token).key
         claims = jwt.decode(
-            token,
-            signing_key,
-            algorithms=["RS256", "ES256"],
+            token, signing_key, algorithms=["RS256", "ES256"],
             issuer=os.environ["OIDC_ISSUER"],
             options={"require": ["exp", "iat", "sub", "iss"], "verify_aud": False},
             leeway=30,
         )
         expected_audience = os.environ["OIDC_AUDIENCE"]
         token_audience = claims.get("aud")
-        if token_audience:
-            audience_values = token_audience if isinstance(token_audience, list) else [token_audience]
-            if expected_audience not in audience_values:
-                raise HTTPException(status_code=401, detail="Access token audience is invalid.")
-        elif claims.get("client_id") != expected_audience:
-            # Cognito access tokens use client_id; standard OIDC tokens normally use aud.
+        audience_values = token_audience if isinstance(token_audience, list) else [token_audience]
+        if expected_audience not in audience_values and claims.get("client_id") != expected_audience:
             raise HTTPException(status_code=401, detail="Access token audience is invalid.")
-        tenant_id = claims.get("tenant_id") or claims.get("custom:tenant_id")
-        subject = claims.get("sub")
-        if not tenant_id or not subject:
-            raise HTTPException(status_code=401, detail="The identity token is missing required tenant claims.")
-        roles = claims.get("roles", claims.get("groups", claims.get("cognito:groups", [])))
-        if isinstance(roles, str):
-            roles = [roles]
-        if not isinstance(roles, list):
-            roles = []
-        return {"subject": str(subject), "tenant_id": str(tenant_id), "roles": [str(role) for role in roles]}
+        return {
+            "subject": str(claims["sub"]),
+            "email": str(claims.get("email") or "").strip().lower(),
+            "email_verified": claims.get("email_verified") is True or str(claims.get("email_verified", "")).lower() == "true",
+            "name": str(claims.get("name") or claims.get("given_name") or ""),
+            "claims": claims,
+        }
     except HTTPException:
         raise
     except Exception:
         raise HTTPException(status_code=401, detail="Access token validation failed.") from None
 
+
+def get_current_user(
+    identity: dict[str, Any] = Depends(get_verified_identity),
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    claims = identity["claims"]
+    legacy_tenant = claims.get("tenant_id") or claims.get("custom:tenant_id")
+    if legacy_tenant:
+        tenant_id = str(legacy_tenant)
+        raw_roles = claims.get("roles", claims.get("groups", claims.get("cognito:groups", [])))
+        roles = [raw_roles] if isinstance(raw_roles, str) else (raw_roles if isinstance(raw_roles, list) else [])
+        return {"subject": identity["subject"], "tenant_id": tenant_id, "roles": [str(r) for r in roles], "email": identity["email"]}
+    statement = select(TenantMembership).where(
+        TenantMembership.subject == identity["subject"],
+        TenantMembership.status == "active",
+    )
+    if x_tenant_id:
+        statement = statement.where(TenantMembership.tenant_id == x_tenant_id)
+    memberships = db.scalars(statement.order_by(TenantMembership.created_at.asc())).all()
+    if not memberships:
+        raise HTTPException(status_code=403, detail="Your account is verified but is not attached to a company workspace. Create one or accept an invitation.")
+    if len(memberships) > 1 and not x_tenant_id:
+        raise HTTPException(status_code=409, detail="Choose a company workspace by sending its ID in the X-Tenant-ID header.")
+    membership = memberships[0]
+    return {
+        "subject": identity["subject"],
+        "tenant_id": membership.tenant_id,
+        "roles": list(membership.roles or []),
+        "email": membership.email,
+    }
 
 def require_roles(*allowed_roles: str) -> Callable[..., dict[str, Any]]:
     def dependency(user: dict[str, Any] = Depends(get_current_user)) -> dict[str, Any]:
@@ -487,6 +567,29 @@ class DatasetIn(BaseModel):
     category: str = Field(default="general", min_length=1, max_length=80)
     source: str = Field(default="user-submitted", min_length=1, max_length=200)
     record_count: int = Field(default=0, ge=0, le=2_000_000_000)
+    price_usd: Decimal = Field(gt=0, le=1_000_000, max_digits=12, decimal_places=2)
+
+
+class OrganizationIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=2, max_length=160)
+    website: str | None = Field(default=None, max_length=500)
+    country: str = Field(default="US", min_length=2, max_length=2, pattern="^[A-Za-z]{2}$")
+    roles: list[str] = Field(default_factory=lambda: ["buyer"], min_length=1, max_length=2)
+
+
+class InviteIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    email: str = Field(min_length=5, max_length=255)
+    roles: list[str] = Field(min_length=1, max_length=5)
+
+
+class AssetUploadIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    filename: str = Field(min_length=1, max_length=255)
+    content_type: str = Field(min_length=3, max_length=120)
+    size_bytes: int = Field(gt=0, le=1_073_741_824)
+    checksum_sha256: str = Field(pattern="^[a-fA-F0-9]{64}$")
 
 
 class DatasetReviewIn(BaseModel):
@@ -503,7 +606,6 @@ class MatchIn(BaseModel):
 class TradeIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     dataset_id: str = Field(min_length=36, max_length=36)
-    amount_usd: Decimal = Field(gt=0, le=1_000_000, max_digits=12, decimal_places=2)
 
 
 app = FastAPI(
@@ -708,6 +810,120 @@ def integrations_status(_: dict[str, Any] = Depends(get_current_user)):
     }
 
 
+@app.post("/api/onboarding/organizations", status_code=201)
+def create_organization(
+    item: OrganizationIn,
+    identity: dict[str, Any] = Depends(get_verified_identity),
+    db: Session = Depends(get_db),
+):
+    if not identity["email_verified"] or not identity["email"]:
+        raise HTTPException(status_code=403, detail="A verified email address is required to create a company workspace.")
+    roles = sorted(set(item.roles))
+    if not roles or not set(roles).issubset({"buyer", "seller"}):
+        raise HTTPException(status_code=422, detail="Workspace roles must be buyer, seller, or both.")
+    domain = None
+    if item.website:
+        normalized = _normalized_domain(item.website)
+        if not normalized:
+            raise HTTPException(status_code=422, detail="Enter a valid company website.")
+        domain = normalized[0]
+        existing = db.scalar(select(Tenant).where(Tenant.domain == domain))
+        if existing:
+            raise HTTPException(status_code=409, detail="This company domain already has a workspace. Ask an administrator for an invitation.")
+    slug_base = re.sub(r"[^a-z0-9]+", "-", item.name.lower()).strip("-")[:90] or "company"
+    slug = slug_base
+    if db.scalar(select(Tenant.id).where(Tenant.slug == slug)):
+        slug = slug_base + "-" + uuid.uuid4().hex[:8]
+    tenant_id = str(uuid.uuid4())
+    tenant = Tenant(
+        id=tenant_id, name=item.name.strip(), slug=slug, domain=domain,
+        website=item.website, country=item.country.upper(),
+        created_by_subject=identity["subject"], created_at=utc_now(),
+    )
+    membership = TenantMembership(
+        id=str(uuid.uuid4()), tenant_id=tenant_id, subject=identity["subject"],
+        email=identity["email"], roles=sorted(set(roles + ["tenant_admin"])),
+        status="active", created_at=utc_now(),
+    )
+    db.add_all([tenant, membership])
+    record_audit(db, tenant_id, identity["subject"], "organization.created", "tenant", tenant_id, {"roles": roles})
+    db.commit()
+    return {"tenant_id": tenant_id, "name": tenant.name, "slug": slug, "domain": domain, "roles": membership.roles}
+
+
+@app.get("/api/account")
+def account(identity: dict[str, Any] = Depends(get_verified_identity), db: Session = Depends(get_db)):
+    memberships = db.scalars(select(TenantMembership).where(
+        TenantMembership.subject == identity["subject"], TenantMembership.status == "active"
+    ).order_by(TenantMembership.created_at.asc())).all()
+    tenants = []
+    for membership in memberships:
+        tenant = db.get(Tenant, membership.tenant_id)
+        if tenant:
+            tenants.append({
+                "id": tenant.id, "name": tenant.name, "slug": tenant.slug,
+                "domain": tenant.domain, "roles": membership.roles, "created_at": tenant.created_at,
+            })
+    return {"subject": identity["subject"], "email": identity["email"], "email_verified": identity["email_verified"], "workspaces": tenants}
+
+
+@app.post("/api/team/invitations", status_code=201)
+def invite_team_member(
+    item: InviteIn,
+    user: dict[str, Any] = Depends(require_roles("tenant_admin")),
+    db: Session = Depends(get_db),
+):
+    email = item.email.strip().lower()
+    roles = sorted(set(item.roles))
+    allowed = {"buyer", "seller", "compliance", "publisher", "trade_approver", "audit_reader"}
+    if not email or not set(roles).issubset(allowed):
+        raise HTTPException(status_code=422, detail="Invitation email or roles are invalid.")
+    token = secrets.token_urlsafe(32)
+    invite = OrganizationInvite(
+        id=str(uuid.uuid4()), tenant_id=user["tenant_id"], email=email, roles=roles,
+        token_hash=hashlib.sha256(token.encode()).hexdigest(),
+        created_by_subject=user["subject"], created_at=utc_now(),
+        expires_at=(datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+    )
+    db.add(invite)
+    record_audit(db, user["tenant_id"], user["subject"], "team.invitation_created", "invitation", invite.id, {"email": email, "roles": roles})
+    db.commit()
+    return {"invitation_id": invite.id, "acceptance_token": token, "expires_at": invite.expires_at, "note": "Send this token only to the intended verified company email. It expires in seven days."}
+
+
+@app.post("/api/team/invitations/accept")
+def accept_team_invitation(
+    token: str = Query(min_length=32, max_length=256),
+    identity: dict[str, Any] = Depends(get_verified_identity),
+    db: Session = Depends(get_db),
+):
+    if not identity["email_verified"] or not identity["email"]:
+        raise HTTPException(status_code=403, detail="A verified email address is required.")
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    invite = db.scalar(select(OrganizationInvite).where(OrganizationInvite.token_hash == digest))
+    if not invite or invite.accepted_at or invite.expires_at < utc_now():
+        raise HTTPException(status_code=404, detail="Invitation is invalid, expired, or already used.")
+    if invite.email != identity["email"]:
+        raise HTTPException(status_code=403, detail="This invitation was issued to a different email address.")
+    membership = db.scalar(select(TenantMembership).where(
+        TenantMembership.tenant_id == invite.tenant_id,
+        TenantMembership.subject == identity["subject"],
+    ))
+    if membership:
+        membership.roles = sorted(set((membership.roles or []) + (invite.roles or [])))
+        membership.email = identity["email"]
+        membership.status = "active"
+    else:
+        db.add(TenantMembership(
+            id=str(uuid.uuid4()), tenant_id=invite.tenant_id, subject=identity["subject"],
+            email=identity["email"], roles=invite.roles, status="active", created_at=utc_now(),
+        ))
+    invite.accepted_at = utc_now()
+    record_audit(db, invite.tenant_id, identity["subject"], "team.invitation_accepted", "invitation", invite.id)
+    db.commit()
+    return {"accepted": True, "tenant_id": invite.tenant_id, "roles": invite.roles}
+
+
 @app.get("/api/dashboard")
 def dashboard(user: dict[str, Any] = Depends(get_current_user), db: Session = Depends(get_db)):
     dataset_count = db.scalar(select(func.count()).select_from(Dataset).where(Dataset.tenant_id == user["tenant_id"])) or 0
@@ -747,6 +963,7 @@ def create_dataset(
         category=item.category,
         source=item.source,
         record_count=item.record_count,
+        price_usd=item.price_usd,
         license_status="pending_review",
         status="pending_review",
         content_hash=dataset_content_hash(stable),
@@ -777,6 +994,9 @@ def review_dataset(
         raise HTTPException(status_code=404, detail="Dataset not found.")
     if row.status != "pending_review":
         raise HTTPException(status_code=409, detail="Only pending datasets can be reviewed.")
+    if row.seller_subject == user["subject"]:
+        raise HTTPException(status_code=403, detail="The dataset submitter cannot review their own listing.")
+    row.reviewer_subject = user["subject"]
     row.license_status = item.decision
     if item.decision == "rejected":
         row.status = "rejected"
@@ -823,6 +1043,7 @@ def marketplace_listings(
             "description": row.description,
             "category": row.category,
             "record_count": row.record_count,
+            "price_usd": format(Decimal(row.price_usd), "f") if row.price_usd is not None else None,
             "content_hash": row.content_hash,
             "created_at": row.created_at,
         } for row in rows],
@@ -870,9 +1091,9 @@ def create_trade(
     ))
     if dataset is None:
         raise HTTPException(status_code=404, detail="Published marketplace listing not found.")
-    amount = Decimal(item.amount_usd).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    if amount <= 0:
-        raise HTTPException(status_code=422, detail="Trade amount must be greater than zero.")
+    if dataset.price_usd is None or Decimal(dataset.price_usd) <= 0:
+        raise HTTPException(status_code=409, detail="This listing does not have an approved price.")
+    amount = Decimal(dataset.price_usd).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     trade_id = str(uuid.uuid4())
     created_at = utc_now()
     proof = {
