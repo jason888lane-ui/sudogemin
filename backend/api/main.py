@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Callable
+from urllib.parse import quote, urlparse
+from urllib.request import Request as URLRequest, urlopen
 
 import jwt
 import stripe
@@ -108,6 +112,29 @@ class StripeEvent(Base):
     id: Mapped[str] = mapped_column(String(200), primary_key=True)
     event_type: Mapped[str] = mapped_column(String(120), nullable=False)
     received_at: Mapped[str] = mapped_column(String(40), nullable=False)
+
+
+class Prospect(Base):
+    __tablename__ = "prospects"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    company_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    domain: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
+    website: Mapped[str] = mapped_column(String(500), nullable=False)
+    country: Mapped[str] = mapped_column(String(2), nullable=False, default="US")
+    industry: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(String(2000), nullable=False, default="")
+    buyer_fit: Mapped[int] = mapped_column(nullable=False, default=0)
+    seller_fit: Mapped[int] = mapped_column(nullable=False, default=0)
+    fit_score: Mapped[int] = mapped_column(nullable=False, default=0)
+    recommended_role: Mapped[str] = mapped_column(String(20), nullable=False, default="buyer")
+    evidence: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    public_contact: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="needs_review")
+    first_seen_at: Mapped[str] = mapped_column(String(40), nullable=False)
+    last_seen_at: Mapped[str] = mapped_column(String(40), nullable=False)
+    seen_count: Mapped[int] = mapped_column(nullable=False, default=1)
+    reviewed_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    reviewed_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
 
 Index("ix_datasets_marketplace", Dataset.status, Dataset.license_status)
@@ -261,6 +288,162 @@ def trade_proof_fields(trade: Trade) -> dict[str, Any]:
         "amount_usd": format(Decimal(trade.amount_usd).quantize(Decimal("0.01")), "f"),
         "currency": trade.currency,
         "created_at": trade.created_at,
+    }
+
+
+def _normalized_domain(website: str) -> tuple[str, str] | None:
+    candidate = website.strip()
+    if not candidate:
+        return None
+    if "://" not in candidate:
+        candidate = "https://" + candidate
+    parsed = urlparse(candidate)
+    host = (parsed.hostname or "").lower().strip(".")
+    if not host or "." not in host or len(host) > 255:
+        return None
+    if host.startswith("www."):
+        host = host[4:]
+    if host in {"gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "icloud.com", "linkedin.com", "facebook.com", "instagram.com", "google.com"}:
+        return None
+    if not re.fullmatch(r"[a-z0-9.-]+", host):
+        return None
+    clean = f"https://{host}"
+    return host, clean
+
+
+def _gemini_discover_companies(db: Session, max_results: int = 12) -> dict[str, Any]:
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    model = os.getenv("GEMINI_PROSPECT_MODEL", "").strip()
+    if not api_key or not model:
+        raise HTTPException(status_code=503, detail="Autonomous discovery requires GEMINI_API_KEY and GEMINI_PROSPECT_MODEL.")
+    industries = [s.strip() for s in os.getenv("PROSPECTING_INDUSTRIES", "market research, logistics, manufacturing, healthcare technology, retail analytics, financial technology, SaaS").split(",") if s.strip()]
+    geography = os.getenv("PROSPECTING_GEOGRAPHY", "United States").strip()
+    prompt = (
+        "Find real, currently operating B2B companies that could plausibly buy or lawfully supply licensed business datasets "
+        "for a B2B data marketplace. Research company websites and reliable public sources using web search. "
+        f"Target geography: {geography}. Target industries: {', '.join(industries)}. "
+        f"Return up to {max_results} distinct companies. Do not invent companies, domains, contact details, revenue, or claims. "
+        "Only include a company when the official website/domain can be identified and at least one public source URL supports it. "
+        "Do not infer private contact details. Return JSON only with a top-level companies array. "
+        "Each company item must have: company_name, website, country (ISO-2), industry, description, buyer_fit (0-100), "
+        "seller_fit (0-100), public_contact (optional generic business email only when published), "
+        "evidence (array of objects with title and url). Explain the specific public signal supporting buyer/seller fit."
+    )
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "tools": [{"google_search": {}}],
+        "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"},
+    }
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{quote(model, safe='')}:generateContent?key={quote(api_key, safe='')}"
+    request = URLRequest(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=60) as response:
+            raw = response.read(2_000_000)
+        result = json.loads(raw.decode("utf-8"))
+    except Exception:
+        raise HTTPException(status_code=502, detail="The configured Gemini discovery request failed. Check the API key, model, quota, and Search grounding availability.") from None
+    candidates = result.get("candidates") or []
+    if not candidates:
+        raise HTTPException(status_code=502, detail="Gemini returned no discovery candidates.")
+    parts = (candidates[0].get("content") or {}).get("parts") or []
+    generated = "\n".join(str(p.get("text", "")) for p in parts if isinstance(p, dict))
+    try:
+        parsed = json.loads(generated)
+    except Exception:
+        match = re.search(r"\{[\s\S]*\}", generated)
+        if not match:
+            raise HTTPException(status_code=502, detail="Gemini returned results that were not valid JSON.") from None
+        try:
+            parsed = json.loads(match.group(0))
+        except Exception:
+            raise HTTPException(status_code=502, detail="Gemini returned malformed prospect data.") from None
+    grounding = (candidates[0].get("groundingMetadata") or {}).get("groundingChunks") or []
+    grounded_sources = []
+    for chunk in grounding:
+        web = chunk.get("web") or {}
+        uri = web.get("uri")
+        title = web.get("title") or "Public source"
+        if isinstance(uri, str) and uri.startswith("https://"):
+            grounded_sources.append({"title": str(title)[:300], "url": uri[:1000]})
+    companies = parsed.get("companies") if isinstance(parsed, dict) else None
+    if not isinstance(companies, list):
+        raise HTTPException(status_code=502, detail="Gemini response did not contain a companies array.")
+    discovered = 0
+    updated = 0
+    rejected = 0
+    for item in companies[:max_results]:
+        if not isinstance(item, dict):
+            rejected += 1
+            continue
+        name = str(item.get("company_name") or "").strip()[:200]
+        normalized = _normalized_domain(str(item.get("website") or ""))
+        evidence = item.get("evidence") if isinstance(item.get("evidence"), list) else []
+        evidence = [
+            {"title": str(e.get("title") or "Public source")[:300], "url": str(e.get("url"))[:1000]}
+            for e in evidence if isinstance(e, dict) and str(e.get("url") or "").startswith("https://")
+        ][:8]
+        evidence = evidence or grounded_sources[:8]
+        if not name or not normalized or not evidence:
+            rejected += 1
+            continue
+        domain, website = normalized
+        buyer_fit = max(0, min(100, int(item.get("buyer_fit", 0))))
+        seller_fit = max(0, min(100, int(item.get("seller_fit", 0))))
+        fit_score = max(buyer_fit, seller_fit)
+        role = "buyer" if buyer_fit >= seller_fit else "seller"
+        if fit_score < int(os.getenv("PROSPECTING_MIN_SCORE", "45")):
+            rejected += 1
+            continue
+        row = db.scalar(select(Prospect).where(Prospect.domain == domain))
+        if row:
+            row.last_seen_at = utc_now()
+            row.seen_count += 1
+            if row.status == "needs_review":
+                row.company_name = name
+                row.industry = str(item.get("industry") or "unknown")[:120]
+                row.description = str(item.get("description") or "")[:2000]
+                row.buyer_fit = buyer_fit
+                row.seller_fit = seller_fit
+                row.fit_score = fit_score
+                row.recommended_role = role
+                row.evidence = evidence
+                row.public_contact = str(item.get("public_contact") or "")[:255] or None
+            updated += 1
+            continue
+        db.add(Prospect(
+            id=str(uuid.uuid4()),
+            company_name=name,
+            domain=domain,
+            website=website,
+            country=str(item.get("country") or "US").upper()[:2],
+            industry=str(item.get("industry") or "unknown")[:120],
+            description=str(item.get("description") or "")[:2000],
+            buyer_fit=buyer_fit,
+            seller_fit=seller_fit,
+            fit_score=fit_score,
+            recommended_role=role,
+            evidence=evidence,
+            public_contact=str(item.get("public_contact") or "")[:255] or None,
+            status="needs_review",
+            first_seen_at=utc_now(),
+            last_seen_at=utc_now(),
+            seen_count=1,
+        ))
+        discovered += 1
+    db.commit()
+    return {
+        "status": "completed",
+        "discovered": discovered,
+        "refreshed": updated,
+        "rejected_or_unqualified": rejected,
+        "sources": len(grounded_sources),
+        "model": model,
+        "next_step": "Review qualified prospects in the acquisition pipeline. No company account or outreach was created automatically.",
     }
 
 
@@ -419,6 +602,91 @@ def agents(_: dict[str, Any] = Depends(get_current_user)):
         "execution_enabled": False,
         "note": "Agent responsibilities are defined. Connect and validate an AI provider and worker runtime before enabling autonomous execution.",
     }
+
+
+@app.get("/auth/config")
+def auth_config(request: Request):
+    return {
+        "enabled": all(os.getenv(k) for k in ("OIDC_AUTHORIZATION_URL", "OIDC_CLIENT_ID")),
+        "authorization_url": os.getenv("OIDC_AUTHORIZATION_URL"),
+        "client_id": os.getenv("OIDC_CLIENT_ID"),
+        "redirect_uri": os.getenv("OIDC_REDIRECT_URI", str(request.base_url).rstrip("/") + "/auth/callback"),
+        "scope": os.getenv("OIDC_SCOPE", "openid profile email"),
+        "signup_url": os.getenv("OIDC_SIGNUP_URL") or os.getenv("OIDC_AUTHORIZATION_URL"),
+    }
+
+
+@app.get("/api/marketplace/public")
+def public_marketplace(db: Session = Depends(get_db)):
+    rows = db.scalars(select(Dataset).where(
+        Dataset.status == "published", Dataset.license_status == "approved"
+    ).order_by(Dataset.created_at.desc()).limit(200)).all()
+    items = []
+    for row in rows:
+        items.append({
+            "id": row.id,
+            "name": row.name,
+            "description": row.description,
+            "category": row.category,
+            "record_count": row.record_count,
+            "price_usd": format(Decimal(row.price_usd), "f") if getattr(row, "price_usd", None) is not None else None,
+            "content_hash": row.content_hash,
+            "created_at": row.created_at,
+        })
+    return {"items": items, "count": len(items)}
+
+
+@app.get("/api/prospecting/prospects")
+def prospect_pipeline(
+    status: str = Query(default="needs_review", max_length=30),
+    limit: int = Query(default=100, ge=1, le=500),
+    user: dict[str, Any] = Depends(require_roles("platform_admin", "business_development")),
+    db: Session = Depends(get_db),
+):
+    statement = select(Prospect)
+    if status != "all":
+        statement = statement.where(Prospect.status == status)
+    rows = db.scalars(statement.order_by(Prospect.fit_score.desc(), Prospect.last_seen_at.desc()).limit(limit)).all()
+    return {"items": [{
+        "id": row.id, "company_name": row.company_name, "domain": row.domain,
+        "website": row.website, "country": row.country, "industry": row.industry,
+        "description": row.description, "buyer_fit": row.buyer_fit, "seller_fit": row.seller_fit,
+        "fit_score": row.fit_score, "recommended_role": row.recommended_role,
+        "evidence": row.evidence, "public_contact": row.public_contact,
+        "status": row.status, "first_seen_at": row.first_seen_at,
+        "last_seen_at": row.last_seen_at, "seen_count": row.seen_count,
+    } for row in rows], "count": len(rows)}
+
+
+@app.post("/internal/prospecting/run")
+def run_autonomous_prospecting(
+    x_prospecting_token: str | None = Header(default=None, alias="X-Prospecting-Token"),
+    db: Session = Depends(get_db),
+):
+    expected = os.getenv("PROSPECTING_JOB_TOKEN", "")
+    if not expected or not x_prospecting_token or not hmac.compare_digest(expected, x_prospecting_token):
+        raise HTTPException(status_code=401, detail="Invalid prospecting job token.")
+    return _gemini_discover_companies(db, max_results=max(1, min(int(os.getenv("PROSPECTING_BATCH_SIZE", "12")), 30)))
+
+
+@app.post("/api/prospecting/prospects/{prospect_id}/review")
+def review_prospect(
+    prospect_id: str,
+    decision: str = Query(pattern="^(approve|dismiss)$"),
+    user: dict[str, Any] = Depends(require_roles("platform_admin", "business_development")),
+    db: Session = Depends(get_db),
+):
+    row = db.get(Prospect, prospect_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Prospect not found.")
+    if row.status != "needs_review":
+        raise HTTPException(status_code=409, detail="Only prospects awaiting review can be changed.")
+    row.status = "approved_for_outreach" if decision == "approve" else "dismissed"
+    row.reviewed_by = user["subject"]
+    row.reviewed_at = utc_now()
+    record_audit(db, "platform", user["subject"], "prospect." + decision, "prospect", prospect_id, {"domain": row.domain})
+    db.commit()
+    return {"id": row.id, "domain": row.domain, "status": row.status}
 
 
 @app.get("/api/integrations/status")
