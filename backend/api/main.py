@@ -637,6 +637,235 @@ def integrations_status(_: dict[str, Any] = Depends(get_current_user)):
     }
 
 
+
+@app.get("/auth/config")
+def public_auth_config():
+    base = os.getenv("APP_BASE_URL", "").rstrip("/")
+    configured = oidc_login_configured() and base.startswith("https://")
+    return {
+        "configured": configured,
+        "authorization_url": os.getenv("OIDC_AUTHORIZATION_URL") if configured else None,
+        "client_id": os.getenv("OIDC_CLIENT_ID") if configured else None,
+        "redirect_uri": base + "/auth/callback" if configured else None,
+        "scope": os.getenv("OIDC_SCOPES", "openid email profile") if configured else None,
+        "provider_name": os.getenv("OIDC_PROVIDER_NAME", "your identity provider"),
+    }
+
+
+@app.post("/auth/token")
+def exchange_authorization_code(item: AuthTokenIn):
+    if not oidc_login_configured():
+        raise HTTPException(status_code=503, detail="Secure sign-in is not configured.")
+    base = os.getenv("APP_BASE_URL", "").rstrip("/")
+    expected_redirect = base + "/auth/callback"
+    if item.redirect_uri != expected_redirect or not base.startswith("https://"):
+        raise HTTPException(status_code=400, detail="The sign-in redirect URI is invalid.")
+    form = {
+        "grant_type": "authorization_code",
+        "client_id": os.environ["OIDC_CLIENT_ID"],
+        "code": item.code,
+        "redirect_uri": expected_redirect,
+        "code_verifier": item.code_verifier,
+    }
+    client_secret = os.getenv("OIDC_CLIENT_SECRET")
+    if client_secret:
+        form["client_secret"] = client_secret
+    request = UrlRequest(
+        os.environ["OIDC_TOKEN_URL"],
+        data=urlencode(form).encode("utf-8"),
+        headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=12) as response:
+            token_response = json.loads(response.read(65536))
+        identity_token = token_response.get("id_token")
+        if not identity_token:
+            raise ValueError("No OIDC ID token was returned.")
+        jwks_url = os.environ["OIDC_JWKS_URL"]
+        client = _jwks_clients.get(jwks_url)
+        if client is None:
+            client = PyJWKClient(jwks_url, cache_jwk_set=True, lifespan=300)
+            _jwks_clients[jwks_url] = client
+        key = client.get_signing_key_from_jwt(identity_token).key
+        claims = jwt.decode(
+            identity_token,
+            key,
+            algorithms=["RS256", "ES256"],
+            audience=os.environ["OIDC_CLIENT_ID"],
+            issuer=os.environ["OIDC_ISSUER"],
+            options={"require": ["exp", "iat", "sub", "iss", "aud", "nonce"]},
+            leeway=30,
+        )
+        if not secrets.compare_digest(str(claims.get("nonce", "")), item.nonce):
+            raise ValueError("OIDC nonce mismatch.")
+        email = _verified_email(claims)
+        return {
+            "id_token": identity_token,
+            "token_type": "Bearer",
+            "expires_in": int(token_response.get("expires_in", 3600)),
+            "user": {"subject": claims["sub"], "email": email, "name": claims.get("name", "")},
+        }
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=401, detail="Sign-in could not be verified. Check the identity-provider configuration.") from None
+
+
+def slugify_company_name(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
+    if not slug:
+        raise HTTPException(status_code=422, detail="Company name must contain letters or numbers.")
+    return slug[:80]
+
+
+@app.get("/api/account")
+def account_summary(
+    identity: dict[str, Any] = Depends(get_current_identity),
+    db: Session = Depends(get_db),
+):
+    if not identity["email_verified"]:
+        raise HTTPException(status_code=403, detail="A verified email address is required.")
+    memberships = db.scalars(select(TenantMembership).where(
+        TenantMembership.subject == identity["subject"],
+        TenantMembership.status == "active",
+    ).order_by(TenantMembership.created_at.asc())).all()
+    tenant_ids = [membership.tenant_id for membership in memberships]
+    tenant_rows = db.scalars(select(Tenant).where(Tenant.id.in_(tenant_ids))).all() if tenant_ids else []
+    tenants_by_id = {tenant.id: tenant for tenant in tenant_rows}
+    return {
+        "user": {"subject": identity["subject"], "email": identity["email"], "name": identity["name"]},
+        "workspaces": [{
+            "id": membership.tenant_id,
+            "name": tenants_by_id[membership.tenant_id].name,
+            "slug": tenants_by_id[membership.tenant_id].slug,
+            "roles": membership.roles,
+            "country": tenants_by_id[membership.tenant_id].country,
+            "website": tenants_by_id[membership.tenant_id].website,
+        } for membership in memberships if membership.tenant_id in tenants_by_id],
+    }
+
+
+@app.post("/api/onboarding", status_code=201)
+def create_company_workspace(
+    item: OrganizationIn,
+    identity: dict[str, Any] = Depends(get_current_identity),
+    db: Session = Depends(get_db),
+):
+    email = _verified_email(identity["claims"])
+    existing = db.scalar(select(TenantMembership).where(
+        TenantMembership.subject == identity["subject"],
+        TenantMembership.status == "active",
+    ))
+    if existing:
+        raise HTTPException(status_code=409, detail="This account already has a company workspace. Select it or request an invitation.")
+    base_slug = slugify_company_name(item.name)
+    slug = base_slug
+    if db.scalar(select(Tenant.id).where(Tenant.slug == slug)):
+        slug = base_slug[:70] + "-" + secrets.token_hex(4)
+    tenant_id = str(uuid.uuid4())
+    tenant = Tenant(
+        id=tenant_id,
+        name=item.name.strip(),
+        slug=slug,
+        country=item.country.upper(),
+        website=item.website,
+        created_by_subject=identity["subject"],
+        created_at=utc_now(),
+    )
+    membership = TenantMembership(
+        id=str(uuid.uuid4()),
+        tenant_id=tenant_id,
+        subject=identity["subject"],
+        email=email,
+        roles=["tenant_admin", "buyer", "seller", "compliance", "publisher", "trade_approver", "audit_reader"],
+        status="active",
+        created_at=utc_now(),
+    )
+    db.add(tenant)
+    db.add(membership)
+    record_audit(db, tenant_id, identity["subject"], "workspace.created", "tenant", tenant_id, {"company_name": item.name})
+    db.commit()
+    return {"id": tenant_id, "name": tenant.name, "slug": tenant.slug, "roles": membership.roles}
+
+
+@app.post("/api/org/invitations", status_code=201)
+def create_workspace_invitation(
+    item: InvitationIn,
+    user: dict[str, Any] = Depends(require_roles("tenant_admin")),
+    db: Session = Depends(get_db),
+):
+    allowed = {"buyer", "seller", "compliance", "publisher", "trade_approver", "audit_reader"}
+    roles = sorted(set(item.roles))
+    if not roles or any(role not in allowed for role in roles):
+        raise HTTPException(status_code=422, detail="Invitation roles are not permitted.")
+    email = item.email.strip().lower()
+    raw_token = secrets.token_urlsafe(36)
+    now = datetime.now(timezone.utc)
+    invite = OrganizationInvite(
+        id=str(uuid.uuid4()),
+        tenant_id=user["tenant_id"],
+        email=email,
+        roles=roles,
+        token_hash=sha256_hex(raw_token.encode("utf-8")),
+        created_by_subject=user["subject"],
+        created_at=now.isoformat(),
+        expires_at=(now + timedelta(days=7)).isoformat(),
+    )
+    db.add(invite)
+    record_audit(db, user["tenant_id"], user["subject"], "workspace.invitation_created", "invitation", invite.id, {"email": email, "roles": roles})
+    db.commit()
+    return {
+        "id": invite.id,
+        "email": email,
+        "roles": roles,
+        "expires_at": invite.expires_at,
+        "invitation_url": os.getenv("APP_BASE_URL", "").rstrip("/") + "/accept-invite?token=" + raw_token,
+        "delivery": "copy_link",
+        "note": "Share this invitation link only with the intended business contact. The token is shown once.",
+    }
+
+
+@app.post("/api/org/invitations/accept")
+def accept_workspace_invitation(
+    item: InvitationAcceptIn,
+    identity: dict[str, Any] = Depends(get_current_identity),
+    db: Session = Depends(get_db),
+):
+    email = _verified_email(identity["claims"])
+    token_hash = sha256_hex(item.token.encode("utf-8"))
+    invite = db.scalar(select(OrganizationInvite).where(
+        OrganizationInvite.token_hash == token_hash,
+        OrganizationInvite.accepted_at.is_(None),
+    ))
+    if invite is None:
+        raise HTTPException(status_code=404, detail="Invitation is invalid or has already been used.")
+    if invite.email.lower() != email:
+        raise HTTPException(status_code=403, detail="This invitation was issued to a different verified email address.")
+    if datetime.fromisoformat(invite.expires_at) < datetime.now(timezone.utc):
+        raise HTTPException(status_code=410, detail="This invitation has expired.")
+    existing = db.scalar(select(TenantMembership).where(
+        TenantMembership.tenant_id == invite.tenant_id,
+        TenantMembership.subject == identity["subject"],
+    ))
+    if existing:
+        raise HTTPException(status_code=409, detail="You already belong to this workspace.")
+    membership = TenantMembership(
+        id=str(uuid.uuid4()),
+        tenant_id=invite.tenant_id,
+        subject=identity["subject"],
+        email=email,
+        roles=invite.roles,
+        status="active",
+        created_at=utc_now(),
+    )
+    invite.accepted_at = utc_now()
+    db.add(membership)
+    record_audit(db, invite.tenant_id, identity["subject"], "workspace.invitation_accepted", "invitation", invite.id)
+    db.commit()
+    return {"accepted": True, "tenant_id": invite.tenant_id, "roles": invite.roles}
+
+
 @app.get("/api/dashboard")
 def dashboard(user: dict[str, Any] = Depends(get_current_user), db: Session = Depends(get_db)):
     dataset_count = db.scalar(select(func.count()).select_from(Dataset).where(Dataset.tenant_id == user["tenant_id"])) or 0
