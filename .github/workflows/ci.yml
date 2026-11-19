@@ -2,7 +2,7 @@ name: Application CI
 
 on:
   push:
-    branches: [main, production-hardening-2026-11-16]
+    branches: [main, production-hardening-2026-11-16, feature/customer-portal-agent-foundation]
   pull_request:
     branches: [main]
 
