@@ -7,6 +7,14 @@ export default {
       return new Response(null, { status: 204, headers: cors });
     }
 
+    // Serve the customer portal from the same Worker origin when static assets
+    // are configured. API and health routes continue to the FastAPI service.
+    const isApiRoute = url.pathname.startsWith("/api/") ||
+      url.pathname === "/health" || url.pathname === "/ready";
+    if (env.ASSETS && !isApiRoute) {
+      return env.ASSETS.fetch(request);
+    }
+
     if (url.pathname === "/health" && !env.BACKEND_URL) {
       return Response.json({
         status: "ok",
@@ -39,7 +47,8 @@ export default {
     const target = new URL(url.pathname + url.search, backend);
     const headers = new Headers(request.headers);
     headers.delete("host");
-    headers.delete("authorization");
+    // Preserve Authorization: the FastAPI service validates each user's OIDC
+    // bearer token and derives tenant scope from verified token claims.
 
     try {
       const upstream = await fetch(target.toString(), {
