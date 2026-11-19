@@ -1,4 +1,4 @@
-name: API CI
+name: Application CI
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  api:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -25,3 +25,21 @@ jobs:
         run: python -m compileall -q main.py migrations
       - name: Run tests
         run: python -m pytest -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Check browser application syntax
+        run: node --check frontend/app.js
+      - name: Verify static application assets
+        run: |
+          test -s frontend/index.html
+          test -s frontend/config.js
+          test -s frontend/styles.css
+          test -s frontend/README.md
+          grep -q 'Authorization Code + PKCE' frontend/README.md
+          grep -q 'execution_enabled' frontend/app.js
