@@ -43,5 +43,5 @@ jobs:
           test -s frontend/config.js
           test -s frontend/styles.css
           test -s frontend/README.md
-          grep -q 'Authorization Code + PKCE' frontend/README.md
+          grep -q 'Authorization Code flow with PKCE' frontend/README.md
           grep -q 'execution_enabled' frontend/app.js
