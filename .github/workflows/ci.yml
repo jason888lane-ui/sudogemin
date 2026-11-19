@@ -34,7 +34,9 @@ jobs:
         with:
           node-version: "22"
       - name: Check browser application syntax
-        run: node --check frontend/app.js
+        run: |
+          node --check frontend/app.js
+          node --check src/index.js
       - name: Verify static application assets
         run: |
           test -s frontend/index.html
