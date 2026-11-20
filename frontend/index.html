@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101827">
+  <meta name="description" content="Sudogemin — governed B2B data marketplace and intelligence workspace.">
+  <title>Sudogemin | Data Intelligence Exchange</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./config.js"></script>
+  <script defer src="./app.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <a class="brand" href="#"><span class="brand-mark">S</span><span>sudo<span class="brand-light">gemin</span><small>DATA INTELLIGENCE EXCHANGE</small></span></a>
+      <div class="workspace-label">WORKSPACE</div>
+      <nav id="navigation" aria-label="Main navigation">
+        <button class="nav-item active" data-view="overview"><span>◫</span> Overview</button>
+        <button class="nav-item" data-view="marketplace"><span>⌕</span> Marketplace</button>
+        <button class="nav-item" data-view="datasets"><span>▤</span> My datasets</button>
+        <button class="nav-item" data-view="transactions"><span>⇄</span> Transactions</button>
+        <button class="nav-item" data-view="workers"><span>✳</span> AI workers <em>6</em></button>
+        <button class="nav-item" data-view="proofs"><span>◇</span> Trust & proofs</button>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="security-note"><span class="status-dot"></span><div><b>Governance active</b><small>Human approval required</small></div></div>
+        <button id="logout" class="logout" hidden>Sign out ↗</button>
+      </div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div><div class="eyebrow">SUDOGEMIN PLATFORM</div><div class="page-title" id="page-title">Overview</div></div>
+        <div class="top-actions"><span class="connection" id="connection">Not connected</span><button class="avatar" id="account" aria-label="Account">?</button></div>
+      </header>
+      <section id="signin" class="signin">
+        <div class="hero-kicker">THE B2B DATA EXCHANGE</div>
+        <h1>Turn trusted data<br><span>into business value.</span></h1>
+        <p>Discover licensed datasets, manage supplier workflows, and track every transaction with verifiable cryptographic proofs.</p>
+        <div class="signin-card">
+          <div class="signin-icon">S</div><div><b>Secure workspace access</b><small>Sign in with your organization identity provider.</small></div>
+          <button id="login" class="primary">Continue with secure sign-in <span>→</span></button>
+          <small id="auth-help" class="muted">Your organization administrator must configure OIDC before access is available.</small>
+        </div>
+      </section>
+      <section id="app" hidden>
+        <div id="notice" class="notice" role="status" hidden></div>
+        <div id="view"></div>
+      </section>
+      <footer><span>© <span id="year"></span> Sudogemin</span><span>Tenant-isolated · Auditable · Human-governed</span></footer>
+    </main>
+  </div>
+</body>
+</html>

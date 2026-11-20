@@ -1,10 +1,10 @@
 # Sudogemin
 
-Sudogemin is a tenant-isolated B2B data brokerage API. This repository currently ships the API service; it does not yet contain a complete customer-facing web application or autonomous AI worker fleet.
+Sudogemin is a tenant-isolated B2B data brokerage platform. The repository includes a FastAPI service and a customer-portal foundation. The portal covers core customer workflows, but a production-complete data brokerage and executing autonomous AI worker fleet still require the integrations and controls listed below.
 
 ## Production architecture
 
-- FastAPI API service, packaged as a Docker image.
+- FastAPI API service, packaged as a Docker image.\n- Static customer portal in `frontend/`, served by the Cloudflare Worker when its assets binding is configured.
 - PostgreSQL-backed datasets, trades, audit events, and Stripe webhook idempotency records.
 - OIDC bearer-token verification using a configured issuer, audience, and JWKS endpoint.
 - Tenant-scoped access for private datasets and trades; only approved and published listings appear in the marketplace.
@@ -49,7 +49,7 @@ Live Stripe secret keys are rejected unless `STRIPE_LIVE_ENABLED=true`. Payments
 
 The OIDC access token must contain a stable `sub` and a tenant claim named `tenant_id` or `custom:tenant_id`. It must also contain role strings in `roles` or `groups`. Supported roles include `seller`, `buyer`, `compliance`, `publisher`, `trade_approver`, `tenant_admin`, and `platform_admin`.
 
-## API flow
+## Customer portal\n\nThe browser application lives in `frontend/`. It uses OIDC Authorization Code + PKCE and the existing API routes for marketplace listings, dataset metadata registration, compliance review/publication, trade requests, independent approval, Stripe Checkout handoff, and Merkle proof verification. Configure the public OIDC client values in `frontend/config.js`; never place client secrets or backend credentials in browser files. See [`frontend/README.md`](frontend/README.md) for local serving and provider setup.\n\nThe Cloudflare Worker serves the static portal and proxies `/api/*`, `/health`, and `/ready` to the FastAPI backend. Set the Worker `BACKEND_URL` secret to the backend HTTPS origin. The Worker forwards the user's bearer token so FastAPI can verify it.\n\n## API flow
 
 1. A seller with the `seller` role submits dataset metadata to `POST /api/datasets`. New records are always pending compliance review.
 2. A `compliance` reviewer approves or rejects the dataset using `POST /api/datasets/{id}/review`.
@@ -71,7 +71,7 @@ alembic upgrade head
 
 ## Honest capability boundaries
 
-The six agent roles are workflow specifications, not autonomous agents currently executing LLM tasks. The matcher is metadata keyword matching, not an AI model. CUDA-Q is not installed or enabled in this service. Data-file ingestion, secure delivery, seller payout reconciliation, subscription billing, and a customer-facing frontend require additional implementation and provider configuration; the API does not claim these are active.
+The six agent roles are workflow specifications, not autonomous agents currently executing LLM tasks. The portal displays this limitation rather than claiming workers are running. The matcher is metadata keyword matching, not an AI model. CUDA-Q is not installed or enabled in this service. Raw data-file ingestion, scanning/validation, secure delivery, seller payout reconciliation, subscription billing, and a durable autonomous worker runtime still require implementation and provider configuration; the API does not claim these are active.
 
 ## Before accepting production traffic
 
@@ -79,7 +79,7 @@ The six agent roles are workflow specifications, not autonomous agents currently
 - Configure an OIDC provider and create/test the role and tenant claims.
 - Validate browser CORS against the actual frontend domain.
 - Configure Stripe test mode and webhook delivery; test duplicate, replayed, wrong-amount, and wrong-tenant events.
-- Add a production frontend and a controlled data-delivery system.
+- Configure and deploy the customer portal with HTTPS, OIDC redirect origins, API CORS, and the Cloudflare `BACKEND_URL` secret.\n- Implement a controlled raw-file ingestion, validation, storage, and secure delivery system.\n- Implement and validate a durable AI worker runtime with scoped tools, persistent state, retries/idempotency, audit trails, emergency stop, and human approval gates.
 - Configure rate limiting, alerting, log retention, backup monitoring, and a documented incident process.
 - Run a security review and end-to-end tests with separate buyer, seller, compliance, publisher, and approver tenants.
 
